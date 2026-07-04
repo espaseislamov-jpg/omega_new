@@ -1,0 +1,28 @@
+{
+  "sample_name": "O1_1110012204.D",
+  "source_file": "13032026.CSV",
+  "source_signal_file": "O1_1110012204.D",
+  "source_acquired_at": "13 Mar 2026  16:12    ",
+  "omega3": 7.05645880444906,
+  "omega3_report": 7.05645880444906,
+  "profile_fit_meta": {
+    "fit_applied": false,
+    "integration_source": "disabled",
+    "message": "Global pseudo-Voigt fit is disabled for runtime throughput."
+  },
+  "omega3_trio": 7.05645880444906,
+  "omega3_trio_strict": 7.05645880444906,
+  "omega3_trio_corrected": 7.05645880444906,
+  "total_area": 17784.065326991804,
+  "epa_area": 15.46398794761581,
+  "dha_area": 717.5950464373853,
+  "dpa_area": 521.8662091704845,
+  "epa_neighbor_area": 0.0,
+  "epa_overlap_credit_area": 0.0,
+  "epa_effective_area": 15.46398794761581,
+  "epa_overlap_fraction": 0.0,
+  "c22_overlap_source_area": 270.34311762574004,
+  "c22_overlap_credit_area": 0.0,
+  "c22_overlap_fraction": 0.0,
+  "c22_reference_ratio": 1.9303846672840037
+}
