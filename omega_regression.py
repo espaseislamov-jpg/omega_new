@@ -25,12 +25,14 @@ SAMPLE_NAME_RE = re.compile(r"^O(?P<instrument_no>\d+)_(?P<sample_id>\d+)\.D$", 
 # sample, so a position-only workbook would need +1 indexing. ID-based matching
 # is still preferred whenever sample IDs are available.
 POSITION_INDEX_OFFSETS = {"03072026": 1}
+POSITION_MATCH_DATES = {"03072026"}
 OMEGA_CODES = ("C20:5", "C22:5", "C22:6", "C20:3N8", "C22:4", "C18:1N9C", "C18:2N6C", "C18:3N3")
 
 
 @dataclass(frozen=True)
 class ExcelReference:
     row_number: int
+    ordinal: int
     token: int
     reference: float
 
@@ -78,7 +80,7 @@ def load_excel_refs(xlsx_path: Path) -> list[ExcelReference]:
                 except ValueError:
                     pass
         if sample_token is not None and ref_value is not None:
-            refs.append(ExcelReference(excel_idx, sample_token, ref_value))
+            refs.append(ExcelReference(excel_idx, len(refs) + 1, sample_token, ref_value))
     return refs
 
 
@@ -110,6 +112,12 @@ def build_batch_records(csv_path: Path) -> list[BatchRecord]:
 
 
 def resolve_batch(ref: ExcelReference, batches: list[BatchRecord], date: str) -> tuple[BatchRecord | None, str]:
+    if date in POSITION_MATCH_DATES:
+        batch_index = ref.ordinal - 1
+        if 0 <= batch_index < len(batches):
+            return batches[batch_index], "position_date_override"
+        return None, "missing_position_date_override"
+
     by_sample_id = {batch.sample_id: batch for batch in batches if batch.sample_id is not None}
     by_instrument_no = {batch.instrument_no: batch for batch in batches if batch.instrument_no is not None}
 
