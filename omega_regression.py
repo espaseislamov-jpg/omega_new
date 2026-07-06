@@ -27,6 +27,8 @@ SAMPLE_NAME_RE = re.compile(r"^O(?P<instrument_no>\d+)_(?P<sample_id>\d+)\.D$", 
 POSITION_INDEX_OFFSETS = {"03072026": 1}
 POSITION_MATCH_DATES = {"03072026"}
 OMEGA_CODES = ("C20:5", "C22:5", "C22:6", "C20:3N8", "C22:4", "C18:1N9C", "C18:2N6C", "C18:3N3")
+DIAGNOSTIC_TARGET_CODES = ("C20:5", "C20:3N8", "C20:4N6", "C22:6", "C22:5", "C22:4", "C18:1N9C", "C18:2N6C", "C18:3N3")
+OMEGA_TARGET_CODES = ("C20:5", "C22:6", "C22:5")
 
 
 @dataclass(frozen=True)
@@ -192,12 +194,27 @@ def _extract_result_features(result: dict) -> dict:
         elif isinstance(value, (int, float, np.integer, np.floating)):
             features[f"omega_{key}"] = _safe_float(value)
     if isinstance(matched, pd.DataFrame):
-        for code in OMEGA_CODES:
+        for code in DIAGNOSTIC_TARGET_CODES:
             slug = code.replace(":", "_").replace("/", "_")
             row = _target_row(matched, code)
+            found_rt = _safe_float(row.get("found_rt")) if row is not None else np.nan
+            expected_rt = _safe_float(row.get("expected_rt")) if row is not None else np.nan
+            corrected_target_rt = _safe_float(row.get("corrected_target_rt")) if row is not None else np.nan
+            start_x = _safe_float(row.get("integration_start_x")) if row is not None else np.nan
+            end_x = _safe_float(row.get("integration_end_x")) if row is not None else np.nan
+            width = _target_width(matched, code)
             features[f"{slug}_area"] = _safe_float(row.get("area")) if row is not None else np.nan
-            features[f"{slug}_found_rt"] = _safe_float(row.get("found_rt")) if row is not None else np.nan
-            features[f"{slug}_width"] = _target_width(matched, code)
+            features[f"{slug}_found_rt"] = found_rt
+            features[f"{slug}_expected_rt"] = expected_rt
+            features[f"{slug}_corrected_target_rt"] = corrected_target_rt
+            features[f"{slug}_rt_error"] = found_rt - corrected_target_rt if np.isfinite(found_rt) and np.isfinite(corrected_target_rt) else np.nan
+            features[f"{slug}_width"] = width
+            features[f"{slug}_left_width"] = found_rt - start_x if np.isfinite(found_rt) and np.isfinite(start_x) else np.nan
+            features[f"{slug}_right_width"] = end_x - found_rt if np.isfinite(end_x) and np.isfinite(found_rt) else np.nan
+            if np.isfinite(width) and width > 0 and np.isfinite(found_rt) and np.isfinite(start_x) and np.isfinite(end_x):
+                features[f"{slug}_asymmetry"] = max(found_rt - start_x, end_x - found_rt) / max(min(found_rt - start_x, end_x - found_rt), 1e-9)
+            else:
+                features[f"{slug}_asymmetry"] = np.nan
             features[f"{slug}_status"] = _target_status(matched, code)
     return features
 
@@ -515,6 +532,150 @@ def build_summary_table(results: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+def _issue_parts(row: pd.Series) -> list[str]:
+    parts: list[str] = []
+    confidence = _safe_float(row.get("confidence"))
+    delta = _safe_float(row.get("delta"))
+    c22_ratio = _safe_float(row.get("omega_c22_reference_ratio"))
+    c22_debit_points = _safe_float(row.get("omega_c22_overintegration_debit_points"), 0.0)
+    c22_credit_points = 100.0 * _safe_float(row.get("omega_c22_overlap_credit_area"), 0.0) / max(_safe_float(row.get("omega_effective_total_area"), 1.0), 1e-9)
+    c20_status = " ".join(str(row.get(f"{code.replace(':', '_')}_status", "")) for code in ["C20:5", "C20:3N8", "C20:4N6"])
+    c22_status = " ".join(str(row.get(f"{code.replace(':', '_')}_status", "")) for code in ["C22:6", "C22:5", "C22:4"])
+    c18_status = " ".join(str(row.get(f"{code.replace(':', '_')}_status", "")) for code in ["C18:1N9C", "C18:2N6C", "C18:3N3"])
+
+    if np.isfinite(confidence) and confidence < 60:
+        parts.append("low_or_medium_confidence")
+    if str(row.get("baseline_mode", "")) not in {"", "chebyshev"}:
+        parts.append("baseline_fallback")
+    if "not_found" in f"{c20_status} {c22_status} {c18_status}":
+        parts.append("missing_target")
+    if any(token in c22_status for token in ["tail", "baseexpand", "fit"]):
+        parts.append("c22_complex_boundaries")
+    if any(token in c20_status for token in ["baseexpand", "fit", "local"]):
+        parts.append("c20_complex_boundaries")
+    if any(token in c18_status for token in ["baseexpand", "valley"]):
+        parts.append("c18_complex_boundaries")
+    if np.isfinite(c22_ratio) and c22_ratio > 1.35:
+        parts.append("high_dpa_to_c22_4_ratio")
+    if c22_debit_points > 0.05:
+        parts.append("c22_debit_applied")
+    if c22_credit_points > 0.05:
+        parts.append("c22_credit_applied")
+
+    max_rt_error = 0.0
+    max_width = 0.0
+    max_asymmetry = 0.0
+    for code in DIAGNOSTIC_TARGET_CODES:
+        slug = code.replace(":", "_")
+        rt_error = abs(_safe_float(row.get(f"{slug}_rt_error")))
+        width = _safe_float(row.get(f"{slug}_width"))
+        asymmetry = _safe_float(row.get(f"{slug}_asymmetry"))
+        if np.isfinite(rt_error):
+            max_rt_error = max(max_rt_error, rt_error)
+        if np.isfinite(width):
+            max_width = max(max_width, width)
+        if np.isfinite(asymmetry):
+            max_asymmetry = max(max_asymmetry, asymmetry)
+    if max_rt_error > 0.035:
+        parts.append("large_rt_error")
+    if max_width > 0.075:
+        parts.append("wide_peak_window")
+    if max_asymmetry > 4.0:
+        parts.append("asymmetric_peak_window")
+
+    if np.isfinite(delta) and abs(delta) <= 0.3:
+        parts.append("within_inter_operator_band")
+    elif np.isfinite(delta) and abs(delta) <= 0.5:
+        parts.append("within_clinical_band")
+    elif np.isfinite(delta) and delta > 0:
+        parts.append("overestimated_gt_0_5")
+    elif np.isfinite(delta):
+        parts.append("underestimated_gt_0_5")
+    return parts
+
+
+def classify_diagnostic_bucket(row: pd.Series) -> str:
+    parts = set(_issue_parts(row))
+    delta = _safe_float(row.get("delta"))
+    if np.isfinite(delta) and abs(delta) <= 0.3:
+        return "ok_within_0_3"
+    if np.isfinite(delta) and abs(delta) <= 0.5:
+        return "watch_within_0_5"
+    direction = "over" if np.isfinite(delta) and delta > 0 else "under"
+    if "c22_complex_boundaries" in parts or "high_dpa_to_c22_4_ratio" in parts or "c22_debit_applied" in parts:
+        return f"{direction}_c22_cluster"
+    if "c20_complex_boundaries" in parts:
+        return f"{direction}_c20_cluster"
+    if "c18_complex_boundaries" in parts or "baseline_fallback" in parts:
+        return f"{direction}_baseline_or_c18_denominator"
+    if "low_or_medium_confidence" in parts or "large_rt_error" in parts or "missing_target" in parts:
+        return f"{direction}_low_confidence_or_rt"
+    return f"{direction}_unclassified"
+
+
+def build_diagnostic_tables(results: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    if results.empty:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    sample_rows = []
+    peak_rows = []
+    for _, row in results.iterrows():
+        issue_parts = _issue_parts(row)
+        bucket = classify_diagnostic_bucket(row)
+        sample_key = {
+            "date": row.get("date"),
+            "sample_no": row.get("sample_no"),
+            "sample_name": row.get("sample_name"),
+            "reference": row.get("reference"),
+            "calculated": row.get("calculated"),
+            "delta": row.get("delta"),
+            "abs_delta": row.get("abs_delta"),
+            "confidence": row.get("confidence"),
+            "review_flag": row.get("review_flag"),
+            "outlier_class": row.get("outlier_class"),
+            "diagnostic_bucket": bucket,
+            "diagnostic_reasons": ",".join(issue_parts),
+            "baseline_mode": row.get("baseline_mode"),
+            "rt_shift": row.get("rt_shift"),
+            "omega_c22_reference_ratio": row.get("omega_c22_reference_ratio"),
+            "omega_c22_overintegration_debit_points": row.get("omega_c22_overintegration_debit_points"),
+        }
+        sample_rows.append(sample_key)
+        for code in DIAGNOSTIC_TARGET_CODES:
+            slug = code.replace(":", "_")
+            peak_rows.append({
+                **{key: sample_key[key] for key in ["date", "sample_no", "sample_name", "diagnostic_bucket"]},
+                "target_code": code,
+                "expected_rt": row.get(f"{slug}_expected_rt"),
+                "corrected_target_rt": row.get(f"{slug}_corrected_target_rt"),
+                "found_rt": row.get(f"{slug}_found_rt"),
+                "rt_error": row.get(f"{slug}_rt_error"),
+                "area": row.get(f"{slug}_area"),
+                "width": row.get(f"{slug}_width"),
+                "left_width": row.get(f"{slug}_left_width"),
+                "right_width": row.get(f"{slug}_right_width"),
+                "asymmetry": row.get(f"{slug}_asymmetry"),
+                "status": row.get(f"{slug}_status"),
+            })
+
+    sample_diagnostics = pd.DataFrame(sample_rows)
+    peak_diagnostics = pd.DataFrame(peak_rows)
+    issue_summary = (
+        sample_diagnostics.groupby("diagnostic_bucket", dropna=False)
+        .agg(
+            n=("diagnostic_bucket", "size"),
+            MAE=("abs_delta", "mean"),
+            RMSE=("delta", lambda values: math.sqrt(float(np.mean(np.square(values))))),
+            max_abs=("abs_delta", "max"),
+            within_0_3=("abs_delta", lambda values: int((values <= 0.3).sum())),
+            within_0_5=("abs_delta", lambda values: int((values <= 0.5).sum())),
+        )
+        .reset_index()
+        .sort_values(["max_abs", "MAE"], ascending=[False, False])
+    )
+    return sample_diagnostics, peak_diagnostics, issue_summary
+
 def _markdown_table(df: pd.DataFrame) -> str:
     if df.empty:
         return "_empty_"
@@ -544,23 +705,31 @@ def write_reports(
     command_text: str,
 ) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
+    sample_diagnostics, peak_diagnostics, issue_summary = build_diagnostic_tables(results)
     with pd.ExcelWriter(out) as writer:
         results.to_excel(writer, sheet_name="Results", index=False)
         summary.to_excel(writer, sheet_name="Summary", index=False)
         outliers.to_excel(writer, sheet_name="Outliers_gt_0_5", index=False)
         audit.to_excel(writer, sheet_name="Input_audit", index=False)
         errors.to_excel(writer, sheet_name="Errors", index=False)
+        sample_diagnostics.to_excel(writer, sheet_name="Sample_diagnostics", index=False)
+        peak_diagnostics.to_excel(writer, sheet_name="Peak_diagnostics", index=False)
+        issue_summary.to_excel(writer, sheet_name="Issue_summary", index=False)
         if not variants.empty:
             variants.to_excel(writer, sheet_name="Variants", index=False)
 
     stem = out.with_suffix("")
     prefix = "omega_regression" if out.name == "omega_regression_current.xlsx" else out.stem
+
     summary.to_csv(stem.parent / f"{prefix}_summary.csv", index=False)
     outliers.to_csv(stem.parent / f"{prefix}_outliers_gt_0_5.csv", index=False)
     audit.to_csv(stem.parent / f"{prefix}_input_audit.csv", index=False)
     errors.to_csv(stem.parent / f"{prefix}_errors.csv", index=False)
     if not variants.empty:
         variants.to_csv(stem.parent / f"{prefix}_variants.csv", index=False)
+    sample_diagnostics.to_csv(stem.parent / f"{prefix}_sample_diagnostics.csv", index=False)
+    peak_diagnostics.to_csv(stem.parent / f"{prefix}_peak_diagnostics.csv", index=False)
+    issue_summary.to_csv(stem.parent / f"{prefix}_issue_summary.csv", index=False)
 
     all_row = summary[summary["scope"] == "ALL"].iloc[0].to_dict() if not summary.empty else {"n": 0}
     review_summary = (
@@ -596,6 +765,14 @@ def write_reports(
         "## Review / outlier classification",
         "",
         _markdown_table(review_summary),
+        "",
+        "## Diagnostic issue summary",
+        "",
+        _markdown_table(issue_summary),
+        "",
+        "## Top diagnostic samples",
+        "",
+        _markdown_table(sample_diagnostics.sort_values("abs_delta", ascending=False).head(25)[[col for col in ["date", "sample_no", "sample_name", "reference", "calculated", "delta", "confidence", "diagnostic_bucket", "diagnostic_reasons"] if col in sample_diagnostics.columns]]),
         "",
         "## Outliers > 0.5",
         "",

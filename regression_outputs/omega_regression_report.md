@@ -1,32 +1,32 @@
 # Omega regression report
 
-Generated with: `python omega_regression.py --data-dir . --out regression_outputs/omega_regression_current.xlsx --debug-dir regression_debug --debug-threshold 0.5`
+Generated with: `python omega_regression.py --data-dir . --out regression_outputs/omega_regression_current.xlsx`
 
 Total evaluated samples: 286
-Overall MAE: 0.312341
-Overall RMSE: 0.485320
-Overall max abs delta: 2.479391
+Overall MAE: 0.192675
+Overall RMSE: 0.271020
+Overall max abs delta: 1.436689
 
 ## Summary
 
 | scope | n | MAE | RMSE | mean_delta | median_abs | std_delta | within_0_2 | within_0_3 | within_0_4 | within_0_5 | within_0_6 | max_abs |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ALL | 286 | 0.312341 | 0.485320 | 0.229466 | 0.197855 | 0.427645 | 148 | 195 | 222 | 238 | 248 | 2.479391 |
-| OLD45 | 45 | 0.195044 | 0.241717 | 0.099509 | 0.171403 | 0.220284 | 26 | 34 | 40 | 43 | 45 | 0.528791 |
-| 01032026 | 4 | 0.235608 | 0.300012 | -0.137103 | 0.199152 | 0.266852 | 2 | 3 | 3 | 3 | 4 | 0.529609 |
-| 02072026 | 75 | 0.399631 | 0.591811 | 0.355696 | 0.217957 | 0.472992 | 37 | 46 | 51 | 56 | 57 | 1.679417 |
-| 03072026 | 75 | 0.440805 | 0.663716 | 0.339217 | 0.254169 | 0.570483 | 29 | 43 | 49 | 52 | 56 | 2.479391 |
-| 06032026 | 15 | 0.171176 | 0.206725 | 0.064329 | 0.126137 | 0.196461 | 10 | 11 | 14 | 15 | 15 | 0.404240 |
-| 09032026 | 6 | 0.161212 | 0.174463 | 0.091683 | 0.136659 | 0.148431 | 4 | 6 | 6 | 6 | 6 | 0.255721 |
-| 13022026 | 11 | 0.248205 | 0.293994 | 0.185844 | 0.254057 | 0.227804 | 4 | 7 | 8 | 11 | 11 | 0.477590 |
-| 13032026 | 13 | 0.142829 | 0.175848 | 0.132202 | 0.134655 | 0.115954 | 11 | 12 | 12 | 13 | 13 | 0.420672 |
-| 14012026 | 18 | 0.224947 | 0.252366 | 0.129650 | 0.220086 | 0.216516 | 8 | 13 | 17 | 17 | 18 | 0.528791 |
-| 16012026 | 17 | 0.176841 | 0.213084 | 0.052169 | 0.135054 | 0.206599 | 11 | 13 | 17 | 17 | 17 | 0.395057 |
-| 18022026 | 9 | 0.168313 | 0.183385 | 0.078340 | 0.132225 | 0.165810 | 5 | 9 | 9 | 9 | 9 | 0.268160 |
-| 20022026 | 7 | 0.127424 | 0.162721 | 0.036445 | 0.097620 | 0.158587 | 6 | 6 | 7 | 7 | 7 | 0.362190 |
-| 20032026 | 14 | 0.205082 | 0.277852 | 0.030400 | 0.157968 | 0.276184 | 7 | 9 | 11 | 13 | 14 | 0.500939 |
-| 23012026 | 7 | 0.159233 | 0.186246 | 0.118935 | 0.141044 | 0.143325 | 6 | 6 | 7 | 7 | 7 | 0.363465 |
-| 27022026 | 15 | 0.252300 | 0.345429 | 0.222701 | 0.138050 | 0.264055 | 8 | 11 | 11 | 12 | 14 | 0.859283 |
+| ALL | 286 | 0.192675 | 0.271020 | 0.062582 | 0.140797 | 0.263696 | 179 | 236 | 261 | 275 | 278 | 1.436689 |
+| OLD45 | 45 | 0.189594 | 0.230734 | 0.049514 | 0.171403 | 0.225359 | 25 | 35 | 41 | 45 | 45 | 0.487020 |
+| 01032026 | 4 | 0.542328 | 0.767982 | -0.443823 | 0.363310 | 0.626752 | 2 | 2 | 2 | 2 | 3 | 1.428173 |
+| 02072026 | 75 | 0.175944 | 0.248407 | 0.094551 | 0.126947 | 0.229709 | 50 | 65 | 71 | 73 | 73 | 1.271281 |
+| 03072026 | 75 | 0.201826 | 0.276635 | 0.078080 | 0.168388 | 0.265387 | 48 | 62 | 66 | 70 | 71 | 1.002719 |
+| 06032026 | 15 | 0.224745 | 0.409470 | -0.112991 | 0.116387 | 0.393572 | 10 | 12 | 13 | 14 | 14 | 1.436689 |
+| 09032026 | 6 | 0.178398 | 0.200993 | 0.006149 | 0.176312 | 0.200899 | 3 | 5 | 6 | 6 | 6 | 0.308157 |
+| 13022026 | 11 | 0.203994 | 0.252392 | 0.130396 | 0.216004 | 0.216098 | 5 | 9 | 9 | 11 | 11 | 0.477590 |
+| 13032026 | 13 | 0.158485 | 0.201482 | 0.086426 | 0.120046 | 0.182005 | 10 | 11 | 12 | 13 | 13 | 0.420672 |
+| 14012026 | 18 | 0.207480 | 0.229020 | 0.112183 | 0.220086 | 0.199663 | 8 | 14 | 17 | 18 | 18 | 0.404052 |
+| 16012026 | 17 | 0.174680 | 0.210700 | 0.066477 | 0.139156 | 0.199938 | 11 | 13 | 17 | 17 | 17 | 0.395057 |
+| 18022026 | 9 | 0.185581 | 0.202088 | 0.030425 | 0.203797 | 0.199785 | 4 | 9 | 9 | 9 | 9 | 0.293322 |
+| 20022026 | 7 | 0.124124 | 0.160613 | 0.031568 | 0.092139 | 0.157480 | 6 | 6 | 7 | 7 | 7 | 0.362190 |
+| 20032026 | 14 | 0.195484 | 0.256887 | -0.065337 | 0.184920 | 0.248439 | 7 | 10 | 12 | 14 | 14 | 0.487020 |
+| 23012026 | 7 | 0.149733 | 0.178849 | 0.109435 | 0.141044 | 0.141460 | 6 | 6 | 7 | 7 | 7 | 0.363465 |
+| 27022026 | 15 | 0.188604 | 0.244956 | 0.155403 | 0.103298 | 0.189349 | 9 | 12 | 13 | 14 | 15 | 0.550894 |
 
 ## Input audit
 
@@ -57,72 +57,75 @@ Overall max abs delta: 2.479391
 
 | review_flag | outlier_class | n |
 | --- | --- | --- |
-| OK | overestimated_unclassified | 84 |
-| OK | underestimated_unclassified | 31 |
-| REJECT | overestimated_cluster | 15 |
-| REJECT | underestimated_cluster | 4 |
-| REJECT | underestimated_low_confidence | 2 |
+| OK | overestimated_unclassified | 78 |
+| OK | underestimated_unclassified | 44 |
+| REJECT | overestimated_cluster | 2 |
+| REJECT | underestimated_cluster | 2 |
 | REJECT | overestimated_low_confidence | 1 |
-| REVIEW | overestimated_cluster | 82 |
+| REJECT | underestimated_low_confidence | 1 |
+| REVIEW | overestimated_cluster | 86 |
+| REVIEW | underestimated_cluster | 20 |
 | REVIEW | overestimated_correction_spread | 14 |
-| REVIEW | overestimated_low_confidence | 12 |
-| REVIEW | underestimated_unclassified | 10 |
-| REVIEW | overestimated_unclassified | 9 |
-| REVIEW | underestimated_cluster | 9 |
-| REVIEW | underestimated_low_confidence | 9 |
+| REVIEW | underestimated_unclassified | 12 |
+| REVIEW | overestimated_low_confidence | 10 |
+| REVIEW | underestimated_low_confidence | 8 |
+| REVIEW | overestimated_unclassified | 4 |
 | REVIEW | underestimated_correction_spread | 4 |
+
+## Diagnostic issue summary
+
+| diagnostic_bucket | n | MAE | RMSE | max_abs | within_0_3 | within_0_5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| under_c22_cluster | 3 | 1.378714 | 1.380810 | 1.436689 | 0 | 0 |
+| over_c22_cluster | 6 | 0.715117 | 0.733889 | 1.002719 | 0 | 0 |
+| under_c20_cluster | 2 | 0.589309 | 0.592325 | 0.649009 | 0 | 0 |
+| watch_within_0_5 | 39 | 0.384883 | 0.388877 | 0.491258 | 0 | 39 |
+| ok_within_0_3 | 236 | 0.129192 | 0.152053 | 0.299952 | 236 | 236 |
+
+## Top diagnostic samples
+
+| date | sample_no | sample_name | reference | calculated | delta | confidence | diagnostic_bucket | diagnostic_reasons |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 06032026 | 2 | O2_1110012176.D | 5.200000 | 3.763311 | -1.436689 | 70.000000 | under_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,underestimated_gt_0_5 |
+| 01032026 | 4 | O4_5555839154.D | 5.300000 | 3.871827 | -1.428173 | 42.000000 | under_c22_cluster | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 02072026 | 105067678302 | O4_105067678302.D | 4.930000 | 3.658719 | -1.271281 | 70.000000 | under_c22_cluster | baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,large_rt_error,wide_peak_window,asymmetric_peak_window,underestimated_gt_0_5 |
+| 03072026 | 105069916298 | O27_925663916002.D | 2.500000 | 3.502719 | 1.002719 | 50.000000 | over_c22_cluster | low_or_medium_confidence,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,overestimated_gt_0_5 |
+| 03072026 | 900512824605 | O8_104837397699.D | 3.000000 | 3.801493 | 0.801493 | 74.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,overestimated_gt_0_5 |
+| 03072026 | 1110012947 | O69_1110012953.D | 2.700000 | 3.478291 | 0.778291 | 60.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,wide_peak_window,asymmetric_peak_window,overestimated_gt_0_5 |
+| 03072026 | 104962405001 | O40_105070893202.D | 9.830000 | 9.180991 | -0.649009 | 60.000000 | under_c20_cluster | baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 02072026 | 903862928199 | O71_903862928199.D | 3.950000 | 4.577730 | 0.627730 | 62.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,wide_peak_window,asymmetric_peak_window,overestimated_gt_0_5 |
+| 27022026 | 5 | O5_1100021851.D | 5.200000 | 5.750894 | 0.550894 | 45.000000 | over_c22_cluster | low_or_medium_confidence,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,overestimated_gt_0_5 |
+| 01032026 | 3 | O3_1110012153.D | 12.500000 | 11.970391 | -0.529609 | 54.000000 | under_c20_cluster | low_or_medium_confidence,baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 03072026 | 105068695803 | O10_929990895102.D | 3.020000 | 3.549577 | 0.529577 | 42.000000 | over_c22_cluster | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,overestimated_gt_0_5 |
+| 02072026 | 105068232403 | O26_105068232403.D | 6.430000 | 6.921258 | 0.491258 | 67.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 20032026 | 8 | O8_1100027096.D | 7.300000 | 6.812980 | -0.487020 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 1110012917 | O72_1110012951.D | 3.400000 | 3.885498 | 0.485498 | 50.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 105070691099 | O51_105067906599.D | 6.340000 | 5.856915 | -0.483085 | 60.000000 | watch_within_0_5 | baseline_fallback,c22_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 13022026 | 1 | O1_5551112961.D | 7.000000 | 7.477590 | 0.477590 | 69.000000 | watch_within_0_5 | c20_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 20032026 | 7 | O7_1100027106.D | 4.100000 | 3.640605 | -0.459395 | 95.000000 | watch_within_0_5 | c20_complex_boundaries,c18_complex_boundaries,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 1110012934 | O66_1110012914.D | 2.700000 | 3.137572 | 0.437572 | 64.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 02072026 | 903982571001 | O24_903982571001.D | 8.020000 | 7.590799 | -0.429201 | 49.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 13032026 | 8 | O8_1100026594.D | 5.900000 | 6.320672 | 0.420672 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 13022026 | 9 | O9_1100020744.D | 5.200000 | 5.616856 | 0.416856 | 64.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 27022026 | 14 | O14_1100021859.D | 8.500000 | 8.909283 | 0.409283 | 54.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 105070893202 | O41_900917265501.D | 7.800000 | 7.391116 | -0.408884 | 60.000000 | watch_within_0_5 | baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 06032026 | 15 | O15_1100026030.D | 7.500000 | 7.904240 | 0.404240 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 14012026 | 12 | O12_1100020191.D | 4.800000 | 5.204052 | 0.404052 | 66.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
 
 ## Outliers > 0.5
 
-Count: 48
+Count: 11
 
 | date | sample_no | instrument_no | sample_id | sample_name | match_method | reference | calculated | delta | confidence | selected_variant |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 03072026 | 105069916298 | 27 | 925663916002 | O27_925663916002.D | position_date_override | 2.500000 | 4.979391 | 2.479391 | 45.000000 | current_pipeline |
-| 03072026 | 1110012947 | 69 | 1110012953 | O69_1110012953.D | position_date_override | 2.700000 | 4.510912 | 1.810912 | 55.000000 | current_pipeline |
-| 03072026 | 105068695803 | 10 | 929990895102 | O10_929990895102.D | position_date_override | 3.020000 | 4.712192 | 1.692192 | 37.000000 | current_pipeline |
-| 02072026 | 105068236802 | 65 | 105068236802 | O65_105068236802.D | sample_id | 3.490000 | 5.169417 | 1.679417 | 31.000000 | current_pipeline |
-| 03072026 | 1110012916 | 57 | 1110012957 | O57_1110012957.D | position_date_override | 3.000000 | 4.618952 | 1.618952 | 39.000000 | current_pipeline |
-| 02072026 | 104714605399 | 30 | 104714605399 | O30_104714605399.D | sample_id | 2.460000 | 4.077767 | 1.617767 | 45.000000 | current_pipeline |
-| 02072026 | 105069117602 | 16 | 105069117602 | O16_105069117602.D | sample_id | 3.220000 | 4.824124 | 1.604124 | 39.000000 | current_pipeline |
-| 02072026 | 105066909103 | 68 | 105066909103 | O68_105066909103.D | sample_id | 3.420000 | 4.970112 | 1.550112 | 43.000000 | current_pipeline |
-| 02072026 | 903862928199 | 71 | 903862928199 | O71_903862928199.D | sample_id | 3.950000 | 5.490953 | 1.540953 | 31.000000 | current_pipeline |
-| 03072026 | 1110012914 | 67 | 1110012959 | O67_1110012959.D | position_date_override | 1.800000 | 3.237897 | 1.437897 | 39.000000 | current_pipeline |
-| 03072026 | 1110012917 | 72 | 1110012951 | O72_1110012951.D | position_date_override | 3.400000 | 4.806425 | 1.406425 | 37.000000 | current_pipeline |
-| 03072026 | 905564620603 | 16 | 905564619906 | O16_905564619906.D | position_date_override | 4.000000 | 5.269973 | 1.269973 | 47.000000 | current_pipeline |
-| 03072026 | 900512824605 | 8 | 104837397699 | O8_104837397699.D | position_date_override | 3.000000 | 4.253579 | 1.253579 | 84.000000 | current_pipeline |
-| 02072026 | 905564618106 | 75 | 905564618106 | O75_905564618106.D | sample_id | 4.260000 | 5.481613 | 1.221613 | 31.000000 | current_pipeline |
-| 03072026 | 905564620803 | 45 | 104236538002 | O45_104236538002.D | position_date_override | 3.010000 | 4.214649 | 1.204649 | 39.000000 | current_pipeline |
-| 02072026 | 105067123002 | 29 | 105067123002 | O29_105067123002.D | sample_id | 3.270000 | 4.379894 | 1.109894 | 49.000000 | current_pipeline |
-| 02072026 | 905564617506 | 63 | 905564617506 | O63_905564617506.D | sample_id | 5.000000 | 6.090876 | 1.090876 | 39.000000 | current_pipeline |
-| 02072026 | 929850052502 | 66 | 929850052502 | O66_929850052502.D | sample_id | 5.440000 | 6.455657 | 1.015657 | 82.000000 | current_pipeline |
-| 03072026 | 105068114497 | 36 | 105071495901 | O36_105071495901.D | position_date_override | 5.130000 | 6.100919 | 0.970919 | 39.000000 | current_pipeline |
-| 03072026 | 1110012934 | 66 | 1110012914 | O66_1110012914.D | position_date_override | 2.700000 | 3.667673 | 0.967673 | 77.000000 | current_pipeline |
-| 03072026 | 1110012957 | 58 | 1110012945 | O58_1110012945.D | position_date_override | 3.200000 | 4.143902 | 0.943902 | 45.000000 | current_pipeline |
-| 02072026 | 104895240699 | 49 | 104895240699 | O49_104895240699.D | sample_id | 3.530000 | 4.448388 | 0.918388 | 49.000000 | current_pipeline |
-| 02072026 | 105068553703 | 33 | 105068553703 | O33_105068553703.D | sample_id | 3.690000 | 4.566451 | 0.876451 | 41.000000 | current_pipeline |
-| 27022026 | 14 | 14 | 1100021859 | O14_1100021859.D | instrument_no | 8.500000 | 9.359283 | 0.859283 | 64.000000 | current_pipeline |
-| 02072026 | 105065793597 | 1 | 105065793597 | O1_105065793597.D | sample_id | 3.300000 | 4.143971 | 0.843971 | 69.000000 | current_pipeline |
-| 03072026 | 1110012949 | 56 | 1110012916 | O56_1110012916.D | position_date_override | 3.400000 | 4.236324 | 0.836324 | 45.000000 | current_pipeline |
-| 02072026 | 922730889202 | 15 | 922730889202 | O15_922730889202.D | sample_id | 4.240000 | 5.075555 | 0.835555 | 77.000000 | current_pipeline |
-| 02072026 | 105066911701 | 19 | 105066911701 | O19_105066911701.D | sample_id | 2.810000 | 3.573096 | 0.763096 | 72.000000 | current_pipeline |
-| 02072026 | 105067678302 | 4 | 105067678302 | O4_105067678302.D | sample_id | 4.930000 | 4.167045 | -0.762955 | 47.000000 | current_pipeline |
-| 02072026 | 1110012961 | 67 | 1110012961 | O67_1110012961.D | sample_id | 3.200000 | 3.918620 | 0.718620 | 72.000000 | current_pipeline |
-| 02072026 | 905564617703 | 62 | 905564617703 | O62_905564617703.D | sample_id | 4.480000 | 5.174218 | 0.694218 | 77.000000 | current_pipeline |
-| 03072026 | 105063823498 | 35 | 105068114497 | O35_105068114497.D | position_date_override | 2.920000 | 3.586143 | 0.666143 | 72.000000 | current_pipeline |
-| 02072026 | 105015060401 | 31 | 105015060401 | O31_105015060401.D | sample_id | 2.990000 | 3.640050 | 0.650050 | 72.000000 | current_pipeline |
+| 06032026 | 2 | 2 | 1110012176 | O2_1110012176.D | instrument_no | 5.200000 | 3.763311 | -1.436689 | 70.000000 | current_pipeline |
+| 01032026 | 4 | 4 | 5555839154 | O4_5555839154.D | instrument_no | 5.300000 | 3.871827 | -1.428173 | 42.000000 | current_pipeline |
+| 02072026 | 105067678302 | 4 | 105067678302 | O4_105067678302.D | sample_id | 4.930000 | 3.658719 | -1.271281 | 70.000000 | current_pipeline |
+| 03072026 | 105069916298 | 27 | 925663916002 | O27_925663916002.D | position_date_override | 2.500000 | 3.502719 | 1.002719 | 50.000000 | current_pipeline |
+| 03072026 | 900512824605 | 8 | 104837397699 | O8_104837397699.D | position_date_override | 3.000000 | 3.801493 | 0.801493 | 74.000000 | current_pipeline |
+| 03072026 | 1110012947 | 69 | 1110012953 | O69_1110012953.D | position_date_override | 2.700000 | 3.478291 | 0.778291 | 60.000000 | current_pipeline |
 | 03072026 | 104962405001 | 40 | 105070893202 | O40_105070893202.D | position_date_override | 9.830000 | 9.180991 | -0.649009 | 60.000000 | current_pipeline |
-| 03072026 | 905564620206 | 12 | 105071372802 | O12_105071372802.D | position_date_override | 2.720000 | 3.356295 | 0.636295 | 67.000000 | current_pipeline |
-| 03072026 | 1110012954 | 55 | 1110012949 | O55_1110012949.D | position_date_override | 3.000000 | 3.621859 | 0.621859 | 72.000000 | current_pipeline |
-| 03072026 | 105067908799 | 18 | 105067955299 | O18_105067955299.D | position_date_override | 3.120000 | 3.724187 | 0.604187 | 72.000000 | current_pipeline |
-| 03072026 | 1110012958 | 60 | 1110012915 | O60_1110012915.D | position_date_override | 4.100000 | 4.702476 | 0.602476 | 41.000000 | current_pipeline |
-| 03072026 | 905564619506 | 53 | 1110012933 | O53_1110012933.D | position_date_override | 2.960000 | 3.556348 | 0.596348 | 72.000000 | current_pipeline |
-| 03072026 | 1110012960 | 62 | 1110012946 | O62_1110012946.D | position_date_override | 2.800000 | 3.381476 | 0.581476 | 82.000000 | current_pipeline |
+| 02072026 | 903862928199 | 71 | 903862928199 | O71_903862928199.D | sample_id | 3.950000 | 4.577730 | 0.627730 | 62.000000 | current_pipeline |
 | 27022026 | 5 | 5 | 1100021851 | O5_1100021851.D | instrument_no | 5.200000 | 5.750894 | 0.550894 | 45.000000 | current_pipeline |
-| 27022026 | 9 | 9 | 1100021818 | O9_1100021818.D | instrument_no | 5.100000 | 5.647341 | 0.547341 | 70.000000 | current_pipeline |
 | 01032026 | 3 | 3 | 1110012153 | O3_1110012153.D | instrument_no | 12.500000 | 11.970391 | -0.529609 | 54.000000 | current_pipeline |
-| 14012026 | 6 | 6 | 1100020225 | O6_1100020225.D | instrument_no | 3.800000 | 4.328791 | 0.528791 | 90.000000 | current_pipeline |
-| 02072026 | 905564618203 | 64 | 905564618203 | O64_905564618203.D | sample_id | 4.850000 | 5.363438 | 0.513438 | 39.000000 | current_pipeline |
-| 03072026 | 1110012918 | 65 | 1110012934 | O65_1110012934.D | position_date_override | 3.300000 | 3.801917 | 0.501917 | 82.000000 | current_pipeline |
-| 20032026 | 13 | 13 | 1100027101 | O13_1100027101.D | instrument_no | 3.300000 | 3.800939 | 0.500939 | 77.000000 | current_pipeline |
-| 03072026 | 905564620406 | 44 | 905564620803 | O44_905564620803.D | position_date_override | 4.930000 | 5.430698 | 0.500698 | 74.000000 | current_pipeline |
+| 03072026 | 105068695803 | 10 | 929990895102 | O10_929990895102.D | position_date_override | 3.020000 | 3.549577 | 0.529577 | 42.000000 | current_pipeline |
