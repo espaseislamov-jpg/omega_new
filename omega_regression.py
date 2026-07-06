@@ -262,7 +262,7 @@ def classify_result(row: dict) -> tuple[str, str, str]:
     max_rt_error = 0.0
     max_width = 0.0
     max_asymmetry = 0.0
-    for code in DIAGNOSTIC_TARGET_CODES:
+    for code in OMEGA_TARGET_CODES:
         slug = code.replace(":", "_")
         rt_error = abs(_safe_float(row.get(f"{slug}_rt_error")))
         width = _safe_float(row.get(f"{slug}_width"))

@@ -57,19 +57,19 @@ Overall max abs delta: 1.436689
 
 | review_flag | outlier_class | n |
 | --- | --- | --- |
-| REJECT | overestimated_cluster | 75 |
-| REJECT | underestimated_unclassified | 31 |
-| REJECT | underestimated_cluster | 19 |
-| REJECT | overestimated_unclassified | 16 |
-| REJECT | overestimated_correction_spread | 11 |
+| REJECT | overestimated_cluster | 53 |
+| REJECT | underestimated_cluster | 18 |
 | REJECT | overestimated_low_confidence | 10 |
 | REJECT | underestimated_low_confidence | 9 |
+| REJECT | overestimated_correction_spread | 7 |
 | REJECT | underestimated_correction_spread | 4 |
-| REVIEW | overestimated_unclassified | 66 |
-| REVIEW | underestimated_unclassified | 25 |
-| REVIEW | overestimated_cluster | 13 |
-| REVIEW | overestimated_correction_spread | 3 |
-| REVIEW | underestimated_cluster | 3 |
+| REJECT | underestimated_unclassified | 3 |
+| REJECT | overestimated_unclassified | 2 |
+| REVIEW | overestimated_unclassified | 80 |
+| REVIEW | underestimated_unclassified | 53 |
+| REVIEW | overestimated_cluster | 35 |
+| REVIEW | overestimated_correction_spread | 7 |
+| REVIEW | underestimated_cluster | 4 |
 | REVIEW | overestimated_low_confidence | 1 |
 
 ## Diagnostic issue summary
