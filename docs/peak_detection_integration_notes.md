@@ -76,6 +76,6 @@ about `2.4794` to `1.4527` on the current extracted corpus.
    strong enough.
 2. Add per-target boundary diagnostics to regression outputs: apex RT error,
    left/right width, neighboring valley depth, and area ratio to nearest neighbor.
-3. Tune C22 overlap handling separately from C20/EPA: after this change most of the
-   remaining large July errors are still clustered around overlapping regions, but
-   they are smaller and easier to triage.
+3. Keep tuning C22 overlap handling separately from C20/EPA: the first bounded
+   C22/DPA over-integration guard now debits only high DPA/C22:4-ratio clusters,
+   with a hard cap in omega points so it cannot create a large negative correction.

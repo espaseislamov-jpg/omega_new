@@ -15,6 +15,11 @@ C22_OVERLAP_MODEL_BLEND = 0.60
 C22_OVERLAP_MODEL_APPLY_FRACTION_MIN = 0.90
 C22_OVERLAP_WIDE_CLUSTER_MEAN_WIDTH = 0.030
 C22_OVERLAP_WIDE_CLUSTER_SCALE = 0.65
+# Conservative C22/DPA over-integration guard: when DPA dwarfs C22:4 in the
+# same local cluster, a bounded part of DPA is treated as likely shared tail area.
+C22_DPA_OVERINTEGRATION_RATIO_MIN = 1.35
+C22_DPA_OVERINTEGRATION_DPA_FRACTION = 0.30
+C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS = 0.45
 
 C18_DENOMINATOR_DOMINANCE_RATIO = 1.60
 C18_DENOMINATOR_SMALL_N3_FRACTION = 0.08
@@ -107,6 +112,9 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overlap_model_applied": False,
         "c22_reference_ratio": np.nan,
         "c22_width_scale": 1.0,
+        "c22_overintegration_debit_area": 0.0,
+        "c22_overintegration_debit_points": 0.0,
+        "c22_overintegration_model_applied": False,
         "c18_denominator_scale": 1.0,
     }
     if matched_targets is None or matched_targets.empty:
@@ -279,7 +287,26 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         c22_width_scale = C22_OVERLAP_WIDE_CLUSTER_SCALE
         c22_fraction *= c22_width_scale
     c22_credit_area = c22_4 * c22_fraction
-    corrected_value = 100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area) / effective_total_area
+
+    c22_debit_area = 0.0
+    c22_debit_points = 0.0
+    c22_debit_applied = False
+    if (
+        c22_4 > 0
+        and dpa > 0
+        and np.isfinite(c22_ratio)
+        and c22_ratio > C22_DPA_OVERINTEGRATION_RATIO_MIN
+    ):
+        max_debit_area = effective_total_area * C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS / 100.0
+        c22_debit_area = float(np.clip(
+            dpa * C22_DPA_OVERINTEGRATION_DPA_FRACTION,
+            0.0,
+            max_debit_area,
+        ))
+        c22_debit_points = 100.0 * c22_debit_area / effective_total_area
+        c22_debit_applied = c22_debit_area > 0
+
+    corrected_value = 100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area - c22_debit_area) / effective_total_area
 
     result.update({
         "omega3_trio": corrected_value,
@@ -304,6 +331,9 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overlap_model_applied": model_applied,
         "c22_reference_ratio": c22_ratio,
         "c22_width_scale": c22_width_scale,
+        "c22_overintegration_debit_area": c22_debit_area,
+        "c22_overintegration_debit_points": c22_debit_points,
+        "c22_overintegration_model_applied": c22_debit_applied,
         "c18_denominator_scale": c18_denominator_scale,
     })
     return result
