@@ -1,0 +1,16 @@
+name: omega
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy>=2.0,<3
+  - pandas>=2.2,<3
+  - scipy>=1.14,<2
+  - matplotlib>=3.9,<4
+  - openpyxl>=3.1,<4
+  - pybaselines>=1.2,<2
+  - lmfit>=1.3,<2
+  - pyopenms>=3.2,<4
+  - scikit-learn>=1.5,<2
+  - hdbscan>=0.8.40,<0.9
