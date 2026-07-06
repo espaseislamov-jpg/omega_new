@@ -36,3 +36,16 @@ as a triage queue.
 The low-risk band currently has zero `>0.5` misses in this corpus, but this is not a
 formal guarantee on new unseen data. Treat it as a practical triage layer until we
 have enough independent future batches to validate it.
+
+## Experimental selector mode
+
+`omega_regression.py --selector-mode safety` now evaluates the existing baseline
+variants and chooses without using the manual reference. The selector prefers the
+lowest safety-judge score, then higher confidence, then lower strict/final spread,
+with the current pipeline winning ties.
+
+This mode is deliberately **not** the default yet. A first old-corpus probe showed
+that naive safety-based variant switching can move risk instead of reducing it: it
+may avoid one known shape pattern while choosing a baseline variant with a worse
+absolute delta. Keep it as an experiment until it beats the default on the full
+extracted corpus, not just on individual scary samples.

@@ -405,6 +405,21 @@ def evaluate_variants(dataframe: pd.DataFrame, reference_targets: pd.DataFrame, 
     return variants
 
 
+def _variant_safety_row(variant: dict) -> dict:
+    features = _extract_result_features(variant)
+    row = {**features, **_judge_features(variant), "delta": np.nan, "abs_delta": np.nan}
+    review_flag, outlier_class, review_reasons = classify_result(row)
+    row["review_flag"] = review_flag
+    row["outlier_class"] = outlier_class
+    row["review_reasons"] = review_reasons
+    safety_score, safety_band, safety_direction, safety_reasons = safety_judge(row)
+    row["safety_judge_score"] = safety_score
+    row["safety_judge_band"] = safety_band
+    row["safety_judge_direction"] = safety_direction
+    row["safety_judge_reasons"] = safety_reasons
+    return row
+
+
 def select_variant(variants: list[dict], reference: float, selector_mode: str) -> dict:
     valid = [variant for variant in variants if np.isfinite(_safe_float(variant.get("omega_report")))]
     if not valid:
@@ -415,8 +430,23 @@ def select_variant(variants: list[dict], reference: float, selector_mode: str) -
         # choosing among already available processing variants. Do not use for
         # production patient results because it uses the manual reference.
         return min(valid, key=lambda variant: abs(_safe_float(variant.get("omega_report")) - float(reference)))
+    if selector_mode == "safety":
+        # Reference-free production-style selection: prefer a variant that avoids
+        # the high-risk safety-judge patterns, then prefer higher confidence and
+        # lower strict/final correction spread. This is intentionally conservative
+        # and never looks at the manual Excel value.
+        def key(variant: dict) -> tuple[float, float, float, float]:
+            row = _variant_safety_row(variant)
+            safety_score = _safe_float(row.get("safety_judge_score"), 100.0)
+            confidence = _safe_float(row.get("confidence"), 0.0)
+            corrected = _safe_float(row.get("omega_omega3_trio"))
+            strict = _safe_float(row.get("omega_omega3_trio_strict"))
+            spread = abs(corrected - strict) if np.isfinite(corrected) and np.isfinite(strict) else 999.0
+            # current pipeline wins ties to keep behavior stable.
+            current_penalty = 0.0 if variant.get("variant_name") == "current_pipeline" else 0.05
+            return (safety_score, -confidence, spread, current_penalty)
+        return min(valid, key=key)
     return valid[0]
-
 
 def build_audit_row(date: str, xlsx_path: Path, csv_path: Path, refs: list[ExcelReference], batches: list[BatchRecord]) -> dict:
     ref_tokens = {ref.token for ref in refs}
@@ -549,7 +579,7 @@ def run_current_engine(
                 "reference": float(ref.reference),
             }
             try:
-                variants = evaluate_variants(batch.dataframe, reference_targets, mode="variants" if selector_mode == "oracle" else "current")
+                variants = evaluate_variants(batch.dataframe, reference_targets, mode="variants" if selector_mode in {"oracle", "safety"} else "current")
                 selected = select_variant(variants, ref.reference, selector_mode=selector_mode)
             except Exception as exc:
                 error_row = {**base_row, "error": f"{type(exc).__name__}: {exc}"}
@@ -559,11 +589,15 @@ def run_current_engine(
 
             for variant in variants:
                 features = _extract_result_features(variant) if "variant_error" not in variant else {}
+                variant_safety = _variant_safety_row(variant) if "variant_error" not in variant else {}
                 variant_rows.append({
                     **base_row,
                     "variant_name": variant.get("variant_name", ""),
                     "variant_error": variant.get("variant_error", ""),
                     **features,
+                    "variant_safety_judge_score": variant_safety.get("safety_judge_score"),
+                    "variant_safety_judge_band": variant_safety.get("safety_judge_band"),
+                    "variant_safety_judge_reasons": variant_safety.get("safety_judge_reasons"),
                     "delta": _safe_float(features.get("calculated")) - float(ref.reference) if features else np.nan,
                 })
 
@@ -932,7 +966,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE_PATH)
     parser.add_argument("--out", type=Path, default=PROJECT_DIR / "omega_regression_current.xlsx")
-    parser.add_argument("--selector-mode", choices=["current", "oracle"], default="current")
+    parser.add_argument("--selector-mode", choices=["current", "safety", "oracle"], default="current")
     parser.add_argument("--debug-dir", type=Path, default=None)
     parser.add_argument("--debug-threshold", type=float, default=0.5)
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -972,7 +1006,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 [
                     "python omega_regression.py",
                     f"--data-dir {args.data_dir}",
-                    *(["--selector-mode oracle"] if args.selector_mode == "oracle" else []),
+                    *([f"--selector-mode {args.selector_mode}"] if args.selector_mode != "current" else []),
                     f"--out {args.out}",
                     *(["--debug-dir", str(args.debug_dir), "--debug-threshold", str(args.debug_threshold)] if args.debug_dir is not None else []),
                 ]
