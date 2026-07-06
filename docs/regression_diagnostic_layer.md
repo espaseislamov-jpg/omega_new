@@ -56,3 +56,12 @@ Reason tags are intentionally simple and inspectable. Examples:
 
 The current generated diagnostics show that the remaining misses above `±0.5` are
 not random: they concentrate in C22 cluster buckets first, then C20 cluster cases.
+
+## Safety review flag
+
+The production-style `review_flag` now also considers geometry diagnostics, not just
+confidence. Large RT error, very wide integration windows, asymmetric integration
+windows, baseline fallback, and cluster fitting/expansion all push samples toward
+`REVIEW` or `REJECT`. This is intentionally conservative: a sample may be accurate
+but still flagged if the chromatographic geometry is suspicious. The goal is to
+avoid silently auto-accepting samples that can exceed `±0.5`.
