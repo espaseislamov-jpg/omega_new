@@ -79,3 +79,19 @@ about `2.4794` to `1.4527` on the current extracted corpus.
 3. Keep tuning C22 overlap handling separately from C20/EPA: the first bounded
    C22/DPA over-integration guard now debits only high DPA/C22:4-ratio clusters,
    with a hard cap in omega points so it cannot create a large negative correction.
+
+## Current C22 width-balance correction
+
+The latest calculation change is deliberately small and bounded. After the normal
+EPA/DHA/DPA calculation and existing C22 overlap/debit logic, `compute_omega` looks
+at the local C22 integration widths for `C22:6`, `C22:5`, and `C22:4`. Very narrow
+DPA cases are the only eligible cases. Depending on C22:4 width, DPA area, DHA area,
+and the existing overlap fraction, the metric receives either `+0.20`, `-0.10`, or
+`0.00` omega percentage points.
+
+This is not a replacement for real deconvolution. It is a bounded calibration layer
+that addresses a repeated diagnostic pattern without allowing a large hidden
+correction. The cap is intentionally much smaller than the clinical tolerance band
+(`±0.5`) and the desired inter-operator band (`±0.3`). The remaining large misses
+should still be investigated at the peak-boundary/deconvolution level rather than
+by increasing this calibration.

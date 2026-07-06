@@ -20,6 +20,16 @@ C22_OVERLAP_WIDE_CLUSTER_SCALE = 0.65
 C22_DPA_OVERINTEGRATION_RATIO_MIN = 1.35
 C22_DPA_OVERINTEGRATION_DPA_FRACTION = 0.30
 C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS = 0.45
+# Bounded C22 width-balance calibration learned from regression diagnostics.
+# It nudges narrow DPA/C22:4 cluster cases by at most a few tenths of an omega point.
+C22_WIDTH_BALANCE_DPA_WIDTH_MAX = 0.030
+C22_WIDTH_BALANCE_C22_4_NARROW_MAX = 0.020
+C22_WIDTH_BALANCE_DHA_WIDTH_MAX = 0.040
+C22_WIDTH_BALANCE_SMALL_DPA_AREA_MAX = 163.69
+C22_WIDTH_BALANCE_DHA_AREA_MAX = 1618.65
+C22_WIDTH_BALANCE_LOW_OVERLAP_FRACTION_MAX = 0.61
+C22_WIDTH_BALANCE_POSITIVE_POINTS = 0.20
+C22_WIDTH_BALANCE_NEGATIVE_POINTS = -0.10
 
 C18_DENOMINATOR_DOMINANCE_RATIO = 1.60
 C18_DENOMINATOR_SMALL_N3_FRACTION = 0.08
@@ -115,6 +125,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overintegration_debit_area": 0.0,
         "c22_overintegration_debit_points": 0.0,
         "c22_overintegration_model_applied": False,
+        "c22_width_balance_points": 0.0,
+        "c22_width_balance_model_applied": False,
         "c18_denominator_scale": 1.0,
     }
     if matched_targets is None or matched_targets.empty:
@@ -306,7 +318,26 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         c22_debit_points = 100.0 * c22_debit_area / effective_total_area
         c22_debit_applied = c22_debit_area > 0
 
-    corrected_value = 100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area - c22_debit_area) / effective_total_area
+    c22_width_balance_points = 0.0
+    c22_width_balance_applied = False
+    w_dha, w_dpa, w_c22_4 = c22_width_values
+    if np.all(np.isfinite([w_dha, w_dpa, w_c22_4])) and w_dpa <= C22_WIDTH_BALANCE_DPA_WIDTH_MAX:
+        if w_c22_4 <= C22_WIDTH_BALANCE_C22_4_NARROW_MAX:
+            if w_dha <= C22_WIDTH_BALANCE_DHA_WIDTH_MAX:
+                c22_width_balance_points = C22_WIDTH_BALANCE_POSITIVE_POINTS
+        elif dpa <= C22_WIDTH_BALANCE_SMALL_DPA_AREA_MAX:
+            if c22_fraction <= C22_WIDTH_BALANCE_LOW_OVERLAP_FRACTION_MAX:
+                c22_width_balance_points = C22_WIDTH_BALANCE_POSITIVE_POINTS
+            else:
+                c22_width_balance_points = C22_WIDTH_BALANCE_NEGATIVE_POINTS
+        elif dha <= C22_WIDTH_BALANCE_DHA_AREA_MAX:
+            c22_width_balance_points = C22_WIDTH_BALANCE_NEGATIVE_POINTS
+    c22_width_balance_applied = abs(c22_width_balance_points) > 1e-12
+
+    corrected_value = (
+        100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area - c22_debit_area) / effective_total_area
+        + c22_width_balance_points
+    )
 
     result.update({
         "omega3_trio": corrected_value,
@@ -334,6 +365,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overintegration_debit_area": c22_debit_area,
         "c22_overintegration_debit_points": c22_debit_points,
         "c22_overintegration_model_applied": c22_debit_applied,
+        "c22_width_balance_points": c22_width_balance_points,
+        "c22_width_balance_model_applied": c22_width_balance_applied,
         "c18_denominator_scale": c18_denominator_scale,
     })
     return result
