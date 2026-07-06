@@ -47,7 +47,10 @@ C22_OVERLAP_MODEL_PARAMS = np.asarray([
     0.27922158744448305,
 ], dtype=float)
 
-ENABLE_DATA_DRIVEN_C20_EPA_MODEL = True
+# Disabled by default after July-regression validation: this overlap-credit
+# model was the dominant source of large C20/EPA over-estimation outliers.
+# Keep the parameters below for future bounded/gated replacement experiments.
+ENABLE_DATA_DRIVEN_C20_EPA_MODEL = False
 C20_EPA_MODEL_GATE_RATIO_MAX = 0.70
 C20_EPA_MODEL_BLEND = 0.25
 C20_EPA_OVERLAP_WIDE_NEIGHBOR_RATIO = 1.30
