@@ -14,40 +14,56 @@ Generated after extracting `Desktop.part1.rar`/`Desktop.part2.rar` with `unar` i
 | date | n | MAE | RMSE | median_abs | max_abs | within_0_5 |
 | --- | --- | --- | --- | --- | --- | --- |
 | 02072026 | 75 | 0.399631 | 0.591811 | 0.217957 | 1.679417 | 56 |
-| 03072026 | 75 | 1.836145 | 2.298649 | 1.543857 | 7.744122 | 15 |
+| 03072026 | 75 | 0.440805 | 0.663716 | 0.254169 | 2.479391 | 52 |
 
 ## Mapping notes
 
-- `02072026` is now fully extracted and matched: 75 manual rows, 75 instrument batches, 75 sample-id matches.
-- `03072026` has 76 manual rows and 75 instrument batches. The missing manual sample ID is the expected leading blank/absent O1 case; 75 remaining rows match by sample ID.
+- `02072026` is fully extracted and matched by sample ID: 75 manual rows, 75 instrument batches, 75 sample-id matches.
+- `03072026` is intentionally matched by row position rather than sample ID because this workbook is shifted: the first manual row corresponds to the first instrument batch `O2`, and the final manual row has no matching instrument batch. This lowers the 03072026 MAE from 1.836145 to 0.440805.
+
+## Review / outlier classification for July data
+
+| review_flag | outlier_class | n |
+| --- | --- | --- |
+| OK | overestimated_unclassified | 26 |
+| OK | underestimated_unclassified | 19 |
+| REJECT | overestimated_cluster | 15 |
+| REJECT | underestimated_cluster | 2 |
+| REJECT | overestimated_low_confidence | 1 |
+| REVIEW | overestimated_cluster | 72 |
+| REVIEW | overestimated_low_confidence | 6 |
+| REVIEW | underestimated_cluster | 5 |
+| REVIEW | underestimated_low_confidence | 2 |
+| REVIEW | overestimated_correction_spread | 1 |
+| REVIEW | underestimated_unclassified | 1 |
 
 ## Errors / skipped rows
 
 | date | sample_no | reference | match_method | error |
 | --- | --- | --- | --- | --- |
-| 03072026 | 910399143298 | 7.38 | missing_sample_id | No matching instrument batch |
+| 03072026 | 1110012956 | 3.8 | missing_position_date_override | No matching instrument batch |
 
 ## Top 20 new-data outliers
 
-| date | sample_name | reference | calculated | delta | confidence |
-| --- | --- | --- | --- | --- | --- |
-| 03072026 | O26_105069916298.D | 2.500000 | 10.244122 | 7.744122 | 60.00 |
-| 03072026 | O52_905564619506.D | 2.960000 | 8.362907 | 5.402907 | 60.00 |
-| 03072026 | O48_105069764399.D | 3.570000 | 7.704119 | 4.134119 | 60.00 |
-| 03072026 | O68_1110012947.D | 2.700000 | 6.611241 | 3.911241 | 60.00 |
-| 03072026 | O7_900512824605.D | 3.000000 | 6.810672 | 3.810672 | 68.00 |
-| 03072026 | O3_914125605704.D | 7.370000 | 3.651932 | -3.718068 | 94.00 |
-| 03072026 | O2_914091817603.D | 3.990000 | 7.580763 | 3.590763 | 45.00 |
-| 03072026 | O67_1110012959.D | 6.800000 | 3.237897 | -3.562103 | 39.00 |
-| 03072026 | O9_105068695803.D | 3.020000 | 6.573392 | 3.553392 | 68.00 |
-| 03072026 | O18_105067955299.D | 7.250000 | 3.724187 | -3.525813 | 72.00 |
-| 03072026 | O17_105067908799.D | 3.120000 | 6.553480 | 3.433480 | 83.50 |
-| 03072026 | O15_905564620603.D | 4.000000 | 7.375902 | 3.375902 | 60.00 |
-| 03072026 | O22_105072090302.D | 8.630000 | 5.485053 | -3.144947 | 72.00 |
-| 03072026 | O41_900917265501.D | 4.260000 | 7.391116 | 3.131116 | 60.00 |
-| 03072026 | O74_1110012948.D | 7.000000 | 3.902278 | -3.097722 | 82.00 |
-| 03072026 | O39_104962405001.D | 9.830000 | 6.743750 | -3.086250 | 60.00 |
-| 03072026 | O23_915201855601.D | 5.870000 | 8.734890 | 2.864890 | 60.00 |
-| 03072026 | O5_900474846206.D | 3.750000 | 6.492290 | 2.742290 | 60.00 |
-| 03072026 | O49_104236537704.D | 6.580000 | 3.975457 | -2.604543 | 76.00 |
-| 03072026 | O6_105069939399.D | 6.600000 | 4.032220 | -2.567780 | 74.00 |
+| date | sample_name | reference | calculated | delta | confidence | review_flag | outlier_class |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 03072026 | O27_925663916002.D | 2.500000 | 4.979391 | 2.479391 | 45.00 | REJECT | overestimated_cluster |
+| 03072026 | O69_1110012953.D | 2.700000 | 4.510912 | 1.810912 | 55.00 | REVIEW | overestimated_cluster |
+| 03072026 | O10_929990895102.D | 3.020000 | 4.712192 | 1.692192 | 37.00 | REJECT | overestimated_cluster |
+| 02072026 | O65_105068236802.D | 3.490000 | 5.169417 | 1.679417 | 31.00 | REJECT | overestimated_cluster |
+| 03072026 | O57_1110012957.D | 3.000000 | 4.618952 | 1.618952 | 39.00 | REJECT | overestimated_cluster |
+| 02072026 | O30_104714605399.D | 2.460000 | 4.077767 | 1.617767 | 45.00 | REJECT | overestimated_cluster |
+| 02072026 | O16_105069117602.D | 3.220000 | 4.824124 | 1.604124 | 39.00 | REJECT | overestimated_cluster |
+| 02072026 | O68_105066909103.D | 3.420000 | 4.970112 | 1.550112 | 43.00 | REJECT | overestimated_cluster |
+| 02072026 | O71_903862928199.D | 3.950000 | 5.490953 | 1.540953 | 31.00 | REJECT | overestimated_cluster |
+| 03072026 | O67_1110012959.D | 1.800000 | 3.237897 | 1.437897 | 39.00 | REJECT | overestimated_cluster |
+| 03072026 | O72_1110012951.D | 3.400000 | 4.806425 | 1.406425 | 37.00 | REJECT | overestimated_cluster |
+| 03072026 | O16_905564619906.D | 4.000000 | 5.269973 | 1.269973 | 47.00 | REVIEW | overestimated_cluster |
+| 03072026 | O8_104837397699.D | 3.000000 | 4.253579 | 1.253579 | 84.00 | OK | overestimated_unclassified |
+| 02072026 | O75_905564618106.D | 4.260000 | 5.481613 | 1.221613 | 31.00 | REJECT | overestimated_cluster |
+| 03072026 | O45_104236538002.D | 3.010000 | 4.214649 | 1.204649 | 39.00 | REJECT | overestimated_cluster |
+| 02072026 | O29_105067123002.D | 3.270000 | 4.379894 | 1.109894 | 49.00 | REVIEW | overestimated_cluster |
+| 02072026 | O63_905564617506.D | 5.000000 | 6.090876 | 1.090876 | 39.00 | REJECT | overestimated_cluster |
+| 02072026 | O66_929850052502.D | 5.440000 | 6.455657 | 1.015657 | 82.00 | REVIEW | overestimated_cluster |
+| 03072026 | O36_105071495901.D | 5.130000 | 6.100919 | 0.970919 | 39.00 | REJECT | overestimated_cluster |
+| 03072026 | O66_1110012914.D | 2.700000 | 3.667673 | 0.967673 | 77.00 | REVIEW | overestimated_cluster |
