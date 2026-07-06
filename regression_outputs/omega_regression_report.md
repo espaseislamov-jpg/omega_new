@@ -72,6 +72,46 @@ Overall max abs delta: 1.436689
 | REVIEW | overestimated_unclassified | 4 |
 | REVIEW | underestimated_correction_spread | 4 |
 
+## Diagnostic issue summary
+
+| diagnostic_bucket | n | MAE | RMSE | max_abs | within_0_3 | within_0_5 |
+| --- | --- | --- | --- | --- | --- | --- |
+| under_c22_cluster | 3 | 1.378714 | 1.380810 | 1.436689 | 0 | 0 |
+| over_c22_cluster | 6 | 0.715117 | 0.733889 | 1.002719 | 0 | 0 |
+| under_c20_cluster | 2 | 0.589309 | 0.592325 | 0.649009 | 0 | 0 |
+| watch_within_0_5 | 39 | 0.384883 | 0.388877 | 0.491258 | 0 | 39 |
+| ok_within_0_3 | 236 | 0.129192 | 0.152053 | 0.299952 | 236 | 236 |
+
+## Top diagnostic samples
+
+| date | sample_no | sample_name | reference | calculated | delta | confidence | diagnostic_bucket | diagnostic_reasons |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 06032026 | 2 | O2_1110012176.D | 5.200000 | 3.763311 | -1.436689 | 70.000000 | under_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,underestimated_gt_0_5 |
+| 01032026 | 4 | O4_5555839154.D | 5.300000 | 3.871827 | -1.428173 | 42.000000 | under_c22_cluster | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 02072026 | 105067678302 | O4_105067678302.D | 4.930000 | 3.658719 | -1.271281 | 70.000000 | under_c22_cluster | baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,large_rt_error,wide_peak_window,asymmetric_peak_window,underestimated_gt_0_5 |
+| 03072026 | 105069916298 | O27_925663916002.D | 2.500000 | 3.502719 | 1.002719 | 50.000000 | over_c22_cluster | low_or_medium_confidence,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,overestimated_gt_0_5 |
+| 03072026 | 900512824605 | O8_104837397699.D | 3.000000 | 3.801493 | 0.801493 | 74.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,overestimated_gt_0_5 |
+| 03072026 | 1110012947 | O69_1110012953.D | 2.700000 | 3.478291 | 0.778291 | 60.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,wide_peak_window,asymmetric_peak_window,overestimated_gt_0_5 |
+| 03072026 | 104962405001 | O40_105070893202.D | 9.830000 | 9.180991 | -0.649009 | 60.000000 | under_c20_cluster | baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 02072026 | 903862928199 | O71_903862928199.D | 3.950000 | 4.577730 | 0.627730 | 62.000000 | over_c22_cluster | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,wide_peak_window,asymmetric_peak_window,overestimated_gt_0_5 |
+| 27022026 | 5 | O5_1100021851.D | 5.200000 | 5.750894 | 0.550894 | 45.000000 | over_c22_cluster | low_or_medium_confidence,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,overestimated_gt_0_5 |
+| 01032026 | 3 | O3_1110012153.D | 12.500000 | 11.970391 | -0.529609 | 54.000000 | under_c20_cluster | low_or_medium_confidence,baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,underestimated_gt_0_5 |
+| 03072026 | 105068695803 | O10_929990895102.D | 3.020000 | 3.549577 | 0.529577 | 42.000000 | over_c22_cluster | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,overestimated_gt_0_5 |
+| 02072026 | 105068232403 | O26_105068232403.D | 6.430000 | 6.921258 | 0.491258 | 67.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 20032026 | 8 | O8_1100027096.D | 7.300000 | 6.812980 | -0.487020 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 1110012917 | O72_1110012951.D | 3.400000 | 3.885498 | 0.485498 | 50.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 105070691099 | O51_105067906599.D | 6.340000 | 5.856915 | -0.483085 | 60.000000 | watch_within_0_5 | baseline_fallback,c22_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 13022026 | 1 | O1_5551112961.D | 7.000000 | 7.477590 | 0.477590 | 69.000000 | watch_within_0_5 | c20_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 20032026 | 7 | O7_1100027106.D | 4.100000 | 3.640605 | -0.459395 | 95.000000 | watch_within_0_5 | c20_complex_boundaries,c18_complex_boundaries,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 1110012934 | O66_1110012914.D | 2.700000 | 3.137572 | 0.437572 | 64.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 02072026 | 903982571001 | O24_903982571001.D | 8.020000 | 7.590799 | -0.429201 | 49.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 13032026 | 8 | O8_1100026594.D | 5.900000 | 6.320672 | 0.420672 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 13022026 | 9 | O9_1100020744.D | 5.200000 | 5.616856 | 0.416856 | 64.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 27022026 | 14 | O14_1100021859.D | 8.500000 | 8.909283 | 0.409283 | 54.000000 | watch_within_0_5 | low_or_medium_confidence,baseline_fallback,c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,high_dpa_to_c22_4_ratio,c22_debit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 03072026 | 105070893202 | O41_900917265501.D | 7.800000 | 7.391116 | -0.408884 | 60.000000 | watch_within_0_5 | baseline_fallback,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+| 06032026 | 15 | O15_1100026030.D | 7.500000 | 7.904240 | 0.404240 | 69.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,within_clinical_band |
+| 14012026 | 12 | O12_1100020191.D | 4.800000 | 5.204052 | 0.404052 | 66.000000 | watch_within_0_5 | c22_complex_boundaries,c20_complex_boundaries,c18_complex_boundaries,c22_credit_applied,large_rt_error,asymmetric_peak_window,within_clinical_band |
+
 ## Outliers > 0.5
 
 Count: 11
