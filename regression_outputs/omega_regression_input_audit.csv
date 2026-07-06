@@ -1,4 +1,6 @@
 date,xlsx_path,csv_path,reference_rows,instrument_batches,matched_by_sample_id,reference_id_rows,position_rows,missing_reference_ids
+02072026,extracted_desktop/test_bigbatch_020726.xlsx,extracted_desktop/02072026.CSV,75,75,75,75,0,0
+03072026,extracted_desktop/test_bigbatch_03072026.xlsx,extracted_desktop/03072026.CSV,76,75,75,76,0,1
 01032026,test_bigbatch_01032026.xlsx,01032026.CSV,4,4,0,0,4,0
 06032026,test_bigbatch_06032026.xlsx,06032026.CSV,15,15,0,0,15,0
 09032026,test_bigbatch_09032026.xlsx,09032026.CSV,6,6,0,0,6,0
