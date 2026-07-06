@@ -50,7 +50,7 @@ Research-only oracle selector over available processing variants. This uses the 
 conda run -n omega python omega_regression.py --data-dir . --selector-mode oracle --out regression_outputs/omega_regression_oracle.xlsx
 ```
 
-Optional debug export for outliers:
+Optional debug export for outliers. This writes CSV tables plus `plot.png` for each sample above the threshold so the baseline, integration boundaries, and matched targets can be reviewed visually:
 
 ```bash
 conda run -n omega python omega_regression.py --data-dir . --debug-dir regression_debug --debug-threshold 0.5 --out regression_outputs/omega_regression_current.xlsx

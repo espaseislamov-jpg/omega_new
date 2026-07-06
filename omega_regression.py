@@ -214,6 +214,60 @@ def _judge_features(result: dict) -> dict:
     return {"judge_accepted": 0, "judge_rejected": 0, "judge_codes": "", "judge_reasons": ""}
 
 
+def classify_result(row: dict) -> tuple[str, str, str]:
+    """Return a production-style review flag and regression outlier class.
+
+    The flag intentionally avoids using the manual reference. The outlier class
+    is only a diagnostic label for regression reports and may include the delta
+    direction when a reference is available.
+    """
+    reasons: list[str] = []
+    confidence = _safe_float(row.get("confidence"))
+    cluster_quality = _safe_float(row.get("cluster_quality_score"))
+    rejected = int(row.get("judge_rejected", 0) or 0)
+    strict = _safe_float(row.get("omega_omega3_trio_strict"))
+    corrected = _safe_float(row.get("omega_omega3_trio"))
+    spread = abs(corrected - strict) if np.isfinite(corrected) and np.isfinite(strict) else np.nan
+
+    if np.isfinite(confidence) and confidence < 40:
+        reasons.append("low_confidence")
+    elif np.isfinite(confidence) and confidence < 60:
+        reasons.append("medium_confidence")
+    if np.isfinite(cluster_quality) and cluster_quality < 50:
+        reasons.append("low_cluster_quality")
+    if rejected > 0:
+        reasons.append("judge_rejected")
+    if np.isfinite(spread) and spread > 0.75:
+        reasons.append("strict_corrected_spread")
+
+    status_text = " ".join(str(row.get(f"{code.replace(':', '_')}_status", "")) for code in ["C20:5", "C22:6", "C22:5", "C22:4"])
+    if "not_found" in status_text:
+        reasons.append("missing_target")
+    if "tail" in status_text or "overlap" in status_text or "fit" in status_text:
+        reasons.append("cluster_overlap_or_fit")
+
+    flag = "OK"
+    if any(reason in reasons for reason in ["low_confidence", "missing_target"]) or len(reasons) >= 3:
+        flag = "REJECT"
+    elif reasons:
+        flag = "REVIEW"
+
+    delta = _safe_float(row.get("delta"))
+    direction = "unknown_delta"
+    if np.isfinite(delta):
+        direction = "overestimated" if delta > 0 else "underestimated"
+    if "cluster_overlap_or_fit" in reasons:
+        outlier_class = f"{direction}_cluster"
+    elif "low_confidence" in reasons or "medium_confidence" in reasons:
+        outlier_class = f"{direction}_low_confidence"
+    elif "strict_corrected_spread" in reasons:
+        outlier_class = f"{direction}_correction_spread"
+    else:
+        outlier_class = f"{direction}_unclassified"
+
+    return flag, outlier_class, ",".join(reasons)
+
+
 def _annotated_from_processed(processed: pd.DataFrame, reference_targets: pd.DataFrame, baseline_mode: str) -> dict:
     return metrics.annotate_result(pipeline.process_from_baseline(processed, reference_targets), baseline_mode=baseline_mode)
 
@@ -290,6 +344,55 @@ def dump_debug(debug_dir: Path, row: dict, result: dict) -> None:
         json.dumps({"metadata": metadata, "omega": omega}, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
+    _write_debug_plot(sample_dir / "plot.png", row, result)
+
+
+def _write_debug_plot(path: Path, row: dict, result: dict) -> None:
+    processed = result.get("processed_df")
+    matched = result.get("matched_targets_df")
+    if not isinstance(processed, pd.DataFrame) or processed.empty:
+        return
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+
+    x_col = "x_corrected" if "x_corrected" in processed.columns else "x"
+    x = pd.to_numeric(processed[x_col], errors="coerce")
+    y = pd.to_numeric(processed.get("y_corrected", processed.get("y")), errors="coerce")
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.plot(x, y, color="#1f77b4", linewidth=0.8, label="corrected signal")
+    if "baseline" in processed and "y" in processed:
+        ax.plot(x, pd.to_numeric(processed["y"], errors="coerce"), color="#cccccc", linewidth=0.5, alpha=0.8, label="raw signal")
+        ax.plot(x, pd.to_numeric(processed["baseline"], errors="coerce"), color="#ff7f0e", linewidth=0.8, alpha=0.8, label="baseline")
+
+    if isinstance(matched, pd.DataFrame) and not matched.empty:
+        for _, target in matched.iterrows():
+            code = str(target.get("code", ""))
+            found_rt = _safe_float(target.get("found_rt"))
+            start_x = _safe_float(target.get("integration_start_x"))
+            end_x = _safe_float(target.get("integration_end_x"))
+            if np.isfinite(start_x) and np.isfinite(end_x):
+                ax.axvspan(start_x, end_x, color="#2ca02c", alpha=0.08)
+            if np.isfinite(found_rt):
+                ax.axvline(found_rt, color="#d62728", linewidth=0.5, alpha=0.65)
+                ax.text(found_rt, ax.get_ylim()[1], code, rotation=90, fontsize=7, va="top", ha="center")
+
+    title = (
+        f"{row.get('date')} {row.get('sample_name')} "
+        f"ref={_safe_float(row.get('reference')):.3f} calc={_safe_float(row.get('calculated')):.3f} "
+        f"delta={_safe_float(row.get('delta')):.3f} flag={row.get('review_flag', '')}"
+    )
+    ax.set_title(title)
+    ax.set_xlabel("Retention time, min")
+    ax.set_ylabel("Signal")
+    ax.legend(loc="upper right", fontsize=8)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def run_current_engine(
@@ -367,6 +470,10 @@ def run_current_engine(
                 "abs_delta": abs(delta),
                 "error": "",
             }
+            review_flag, outlier_class, review_reasons = classify_result(out_row)
+            out_row["review_flag"] = review_flag
+            out_row["outlier_class"] = outlier_class
+            out_row["review_reasons"] = review_reasons
             rows.append(out_row)
             if debug_dir is not None and np.isfinite(out_row["abs_delta"]) and out_row["abs_delta"] > debug_threshold:
                 dump_debug(debug_dir, out_row, selected)
@@ -456,6 +563,14 @@ def write_reports(
         variants.to_csv(stem.parent / f"{prefix}_variants.csv", index=False)
 
     all_row = summary[summary["scope"] == "ALL"].iloc[0].to_dict() if not summary.empty else {"n": 0}
+    review_summary = (
+        results.groupby(["review_flag", "outlier_class"], dropna=False)
+        .size()
+        .reset_index(name="n")
+        .sort_values(["review_flag", "n"], ascending=[True, False])
+        if {"review_flag", "outlier_class"}.issubset(results.columns)
+        else pd.DataFrame()
+    )
     report_lines = [
         "# Omega regression report",
         "",
@@ -477,6 +592,10 @@ def write_reports(
         "## Errors",
         "",
         _markdown_table(errors),
+        "",
+        "## Review / outlier classification",
+        "",
+        _markdown_table(review_summary),
         "",
         "## Outliers > 0.5",
         "",

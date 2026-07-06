@@ -1,6 +1,6 @@
 # Omega regression report
 
-Generated with: `python omega_regression.py --data-dir . --out regression_outputs/omega_regression_current.xlsx`
+Generated with: `python omega_regression.py --data-dir . --out regression_outputs/omega_regression_current.xlsx --debug-dir regression_debug --debug-threshold 0.5`
 
 Total evaluated samples: 286
 Overall MAE: 0.312341
@@ -52,6 +52,25 @@ Overall max abs delta: 2.479391
 | date | xlsx_path | csv_path | excel_row | sample_no | reference | match_method | error |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 03072026 | extracted_desktop/test_bigbatch_03072026.xlsx | extracted_desktop/03072026.CSV | 77 | 1110012956 | 3.800000 | missing_position_date_override | No matching instrument batch |
+
+## Review / outlier classification
+
+| review_flag | outlier_class | n |
+| --- | --- | --- |
+| OK | overestimated_unclassified | 84 |
+| OK | underestimated_unclassified | 31 |
+| REJECT | overestimated_cluster | 15 |
+| REJECT | underestimated_cluster | 4 |
+| REJECT | underestimated_low_confidence | 2 |
+| REJECT | overestimated_low_confidence | 1 |
+| REVIEW | overestimated_cluster | 82 |
+| REVIEW | overestimated_correction_spread | 14 |
+| REVIEW | overestimated_low_confidence | 12 |
+| REVIEW | underestimated_unclassified | 10 |
+| REVIEW | overestimated_unclassified | 9 |
+| REVIEW | underestimated_cluster | 9 |
+| REVIEW | underestimated_low_confidence | 9 |
+| REVIEW | underestimated_correction_spread | 4 |
 
 ## Outliers > 0.5
 
