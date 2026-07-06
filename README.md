@@ -24,6 +24,18 @@ conda run -n omega python scripts/verify_environment.py
 conda run -n omega python New_idea.py
 ```
 
+
+## Extract uploaded archive data
+
+The uploaded `Desktop.part1.rar` / `Desktop.part2.rar` files are RAR5 split archives. Use `unar`; `unrar-free` may extract `02072026.CSV` only partially.
+
+```bash
+apt-get update && apt-get install -y unar
+bash scripts/extract_desktop_archives.sh
+```
+
+After extraction, the regression harness will find `extracted_desktop/test_bigbatch_020726.xlsx`, `extracted_desktop/02072026.CSV`, `extracted_desktop/test_bigbatch_03072026.xlsx`, and `extracted_desktop/03072026.CSV` recursively.
+
 ## Run regression
 
 Current production-like engine:
