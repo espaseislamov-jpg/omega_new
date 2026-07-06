@@ -57,20 +57,20 @@ Overall max abs delta: 1.436689
 
 | review_flag | outlier_class | n |
 | --- | --- | --- |
-| OK | overestimated_unclassified | 78 |
-| OK | underestimated_unclassified | 44 |
-| REJECT | overestimated_cluster | 2 |
-| REJECT | underestimated_cluster | 2 |
-| REJECT | overestimated_low_confidence | 1 |
-| REJECT | underestimated_low_confidence | 1 |
-| REVIEW | overestimated_cluster | 86 |
-| REVIEW | underestimated_cluster | 20 |
-| REVIEW | overestimated_correction_spread | 14 |
-| REVIEW | underestimated_unclassified | 12 |
-| REVIEW | overestimated_low_confidence | 10 |
-| REVIEW | underestimated_low_confidence | 8 |
-| REVIEW | overestimated_unclassified | 4 |
-| REVIEW | underestimated_correction_spread | 4 |
+| REJECT | overestimated_cluster | 75 |
+| REJECT | underestimated_unclassified | 31 |
+| REJECT | underestimated_cluster | 19 |
+| REJECT | overestimated_unclassified | 16 |
+| REJECT | overestimated_correction_spread | 11 |
+| REJECT | overestimated_low_confidence | 10 |
+| REJECT | underestimated_low_confidence | 9 |
+| REJECT | underestimated_correction_spread | 4 |
+| REVIEW | overestimated_unclassified | 66 |
+| REVIEW | underestimated_unclassified | 25 |
+| REVIEW | overestimated_cluster | 13 |
+| REVIEW | overestimated_correction_spread | 3 |
+| REVIEW | underestimated_cluster | 3 |
+| REVIEW | overestimated_low_confidence | 1 |
 
 ## Diagnostic issue summary
 

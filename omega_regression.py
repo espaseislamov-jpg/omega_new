@@ -250,12 +250,35 @@ def classify_result(row: dict) -> tuple[str, str, str]:
         reasons.append("low_confidence")
     elif np.isfinite(confidence) and confidence < 60:
         reasons.append("medium_confidence")
+    if str(row.get("baseline_mode", "")) not in {"", "chebyshev"}:
+        reasons.append("baseline_fallback")
     if np.isfinite(cluster_quality) and cluster_quality < 50:
         reasons.append("low_cluster_quality")
     if rejected > 0:
         reasons.append("judge_rejected")
     if np.isfinite(spread) and spread > 0.75:
         reasons.append("strict_corrected_spread")
+
+    max_rt_error = 0.0
+    max_width = 0.0
+    max_asymmetry = 0.0
+    for code in DIAGNOSTIC_TARGET_CODES:
+        slug = code.replace(":", "_")
+        rt_error = abs(_safe_float(row.get(f"{slug}_rt_error")))
+        width = _safe_float(row.get(f"{slug}_width"))
+        asymmetry = _safe_float(row.get(f"{slug}_asymmetry"))
+        if np.isfinite(rt_error):
+            max_rt_error = max(max_rt_error, rt_error)
+        if np.isfinite(width):
+            max_width = max(max_width, width)
+        if np.isfinite(asymmetry):
+            max_asymmetry = max(max_asymmetry, asymmetry)
+    if max_rt_error > 0.035:
+        reasons.append("large_rt_error")
+    if max_width > 0.075:
+        reasons.append("wide_peak_window")
+    if max_asymmetry > 4.0:
+        reasons.append("asymmetric_peak_window")
 
     status_text = " ".join(str(row.get(f"{code.replace(':', '_')}_status", "")) for code in ["C20:5", "C22:6", "C22:5", "C22:4"])
     if "not_found" in status_text:
