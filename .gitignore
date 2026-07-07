@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+Desktop.part*.rar
+extracted_desktop/
+regression_debug/
+regression_data_all/
+build/
+dist/
+*.spec.bak

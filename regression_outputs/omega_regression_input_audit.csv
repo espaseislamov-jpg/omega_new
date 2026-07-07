@@ -1,0 +1,13 @@
+date,xlsx_path,csv_path,reference_rows,instrument_batches,matched_by_sample_id,reference_id_rows,position_rows,missing_reference_ids
+01032026,data/regression/test_bigbatch_01032026.xlsx,data/regression/01032026.CSV,4,4,0,0,4,0
+06032026,data/regression/test_bigbatch_06032026.xlsx,data/regression/06032026.CSV,15,15,0,0,15,0
+09032026,data/regression/test_bigbatch_09032026.xlsx,data/regression/09032026.CSV,6,6,0,0,6,0
+13022026,data/regression/test_bigbatch_13022026.xlsx,data/regression/13022026.CSV,11,11,0,0,11,0
+13032026,data/regression/test_bigbatch_13032026.xlsx,data/regression/13032026.CSV,13,13,0,0,13,0
+14012026,data/regression/test_bigbatch_14012026.xlsx,data/regression/14012026.CSV,18,18,0,0,18,0
+16012026,data/regression/test_bigbatch_16012026.xlsx,data/regression/16012026.CSV,17,17,0,0,17,0
+18022026,data/regression/test_bigbatch_18022026.xlsx,data/regression/18022026.CSV,9,9,0,0,9,0
+20022026,data/regression/test_bigbatch_20022026.xlsx,data/regression/20022026.CSV,7,7,0,0,7,0
+20032026,data/regression/test_bigbatch_20032026.xlsx,data/regression/20032026.CSV,14,14,0,0,14,0
+23012026,data/regression/test_bigbatch_23012026.xlsx,data/regression/23012026.CSV,7,7,0,0,7,0
+27022026,data/regression/test_bigbatch_27022026.xlsx,data/regression/27022026.CSV,15,15,0,0,15,0
