@@ -4008,6 +4008,7 @@ class ChromatogramApp:
         self.selected_target_code = None
         self.manual_start_var = tk.StringVar(value="")
         self.manual_end_var = tk.StringVar(value="")
+        self._manual_drag_active_boundary = None
 
         self.status_var = tk.StringVar(value="Выбери CSV-файл.")
         self.file_var = tk.StringVar(value="Файл не выбран")
@@ -4066,6 +4067,9 @@ class ChromatogramApp:
             self.preview_axes.append(preview_ax)
 
         self.canvas = FigureCanvasTkAgg(self.figure, master=plot_frame)
+        self.canvas.mpl_connect("button_press_event", self.handle_manual_boundary_press)
+        self.canvas.mpl_connect("motion_notify_event", self.handle_manual_boundary_motion)
+        self.canvas.mpl_connect("button_release_event", self.handle_manual_boundary_release)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
         toolbar_host = tk.Frame(plot_frame)
         toolbar_host.pack(fill="x")
@@ -4261,6 +4265,69 @@ class ChromatogramApp:
         self.status_var.set(
             f"Ручная интеграция {self.selected_target_code}: {x[start_idx]:.5f}–{x[end_idx]:.5f}, area {area:.4f}"
         )
+
+    def _manual_bounds_from_vars(self):
+        try:
+            start_x = float(str(self.manual_start_var.get()).replace(",", "."))
+            end_x = float(str(self.manual_end_var.get()).replace(",", "."))
+        except ValueError:
+            return np.nan, np.nan
+        return start_x, end_x
+
+    def _selected_manual_drag_bounds(self):
+        if not self.selected_target_code or self.matched_targets_df.empty:
+            return np.nan, np.nan
+        start_x, end_x = self._manual_bounds_from_vars()
+        if np.isfinite(start_x) and np.isfinite(end_x):
+            return start_x, end_x
+        row = self.matched_targets_df[self.matched_targets_df["code"] == self.selected_target_code]
+        if row.empty:
+            return np.nan, np.nan
+        start_x = pd.to_numeric(row["integration_start_x"], errors="coerce").iloc[0]
+        end_x = pd.to_numeric(row["integration_end_x"], errors="coerce").iloc[0]
+        return float(start_x), float(end_x)
+
+    def handle_manual_boundary_press(self, event):
+        if event.button != 1 or event.inaxes not in [self.ax, *getattr(self, "preview_axes", [])]:
+            return
+        if event.xdata is None or self.df_processed is None or not self.selected_target_code:
+            return
+        start_x, end_x = self._selected_manual_drag_bounds()
+        if not (np.isfinite(start_x) and np.isfinite(end_x)):
+            return
+
+        x_min, x_max = event.inaxes.get_xlim()
+        tolerance = max(0.0025, abs(float(x_max) - float(x_min)) * 0.010)
+        distances = {"start": abs(float(event.xdata) - start_x), "end": abs(float(event.xdata) - end_x)}
+        boundary, distance = min(distances.items(), key=lambda item: item[1])
+        if distance > tolerance:
+            return
+        self._manual_drag_active_boundary = boundary
+        self.status_var.set(f"Тяни {'левую' if boundary == 'start' else 'правую'} границу {self.selected_target_code} мышкой…")
+
+    def handle_manual_boundary_motion(self, event):
+        if self._manual_drag_active_boundary is None or event.xdata is None or self.df_processed is None:
+            return
+        x_col = _get_x_column_name(self.df_processed)
+        x_values = self.df_processed[x_col].to_numpy(dtype=float)
+        x_value = float(np.clip(float(event.xdata), float(np.nanmin(x_values)), float(np.nanmax(x_values))))
+        start_x, end_x = self._selected_manual_drag_bounds()
+        if self._manual_drag_active_boundary == "start":
+            if np.isfinite(end_x):
+                x_value = min(x_value, float(end_x) - 1e-5)
+            self.manual_start_var.set(f"{x_value:.5f}")
+        else:
+            if np.isfinite(start_x):
+                x_value = max(x_value, float(start_x) + 1e-5)
+            self.manual_end_var.set(f"{x_value:.5f}")
+        self.update_plot()
+
+    def handle_manual_boundary_release(self, event):
+        if self._manual_drag_active_boundary is None:
+            return
+        self._manual_drag_active_boundary = None
+        self.status_var.set(f"Граница {self.selected_target_code} изменена мышью; пересчитываю пик…")
+        self.apply_manual_integration()
 
     def handle_batch_tree_selection(self, event=None):
         if self._batch_tree_syncing or self.batch_tree is None:
@@ -4637,6 +4704,9 @@ class ChromatogramApp:
         if selected_row is not None:
             start_x = pd.to_numeric(pd.Series([selected_row.get("integration_start_x") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
             end_x = pd.to_numeric(pd.Series([selected_row.get("integration_end_x") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
+            manual_start_x, manual_end_x = self._manual_bounds_from_vars()
+            if np.isfinite(manual_start_x) and np.isfinite(manual_end_x):
+                start_x, end_x = manual_start_x, manual_end_x
             apex_x = pd.to_numeric(pd.Series([selected_row.get("found_rt") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
             if (not np.isfinite(start_x) or not np.isfinite(end_x)) and selected_peak is not None:
                 start_x = float(selected_peak["start_x"])
