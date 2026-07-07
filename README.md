@@ -79,3 +79,27 @@ The regression harness now writes:
 - `omega_regression_report.md` for human review.
 
 Large local archives, extracted data folders, and debug folders are intentionally ignored by Git.
+
+## Build omega_v2 executable
+
+`omega_v2.py` is the bootstrap launcher for the GUI. When it is started from source on a machine with Python 3.10+, it checks the required Python packages and installs missing dependencies from `requirements.txt` / `requirements-chromatopy.txt` before launching `New_idea.py`.
+
+Build the distributable app with PyInstaller:
+
+```bash
+python scripts/build_omega_v2.py
+```
+
+On Windows, run:
+
+```bat
+scripts\build_omega_v2_windows.bat
+```
+
+The expected Windows output is:
+
+```text
+dist\omega_v2\omega_v2.exe
+```
+
+Note: PyInstaller builds for the current operating system. A true Windows `.exe` must be built on Windows; Linux produces `dist/omega_v2/omega_v2`.
