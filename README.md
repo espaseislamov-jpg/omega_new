@@ -103,3 +103,17 @@ dist\omega_v2\omega_v2.exe
 ```
 
 Note: PyInstaller builds for the current operating system. A true Windows `.exe` must be built on Windows; Linux produces `dist/omega_v2/omega_v2`.
+
+## Download omega_v2 setup from GitHub
+
+For a non-programmer workflow, use the GitHub Actions artifact:
+
+1. Open the repository on GitHub.
+2. Go to **Actions**.
+3. Open **Build omega_v2 Windows app**.
+4. Press **Run workflow** on branch `work`.
+5. Wait until the run becomes green.
+6. Open the finished run and download artifact **omega_v2_windows_setup**.
+7. Unzip it and run `omega_v2_setup.exe`.
+
+The workflow also uploads **omega_v2_windows_portable** if you want the raw portable folder without installer.
