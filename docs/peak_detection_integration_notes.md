@@ -109,3 +109,12 @@ The next boundary fix should be local and evidence-based: for each high-risk C22
 cluster, evaluate valley depth, derivative sign changes, and area conservation before
 moving boundaries. Stable target RTs should act as priors and guardrails, not as hard
 integration endpoints.
+
+## July regression hard-outlier pass
+
+The latest full regression showed that the remaining >0.5 omega-point failures were not random; they clustered around two integration/credit failure modes:
+
+1. **Severe EPA underfit in the C20 cluster.**  `C20:5` was sometimes integrated as an extremely small sliver while `C20:3N8` carried a large neighboring shoulder.  The old data-driven C20 credit was disabled because it overcorrected broad cases, so this pass re-enabled it only behind a tighter `EPA/C20:3N8 < 0.25` gate and adds extra underfit scale only for very low EPA ratios.
+2. **Borderline C22 credit overshoot.**  When `C22:5/C22:4` is around 0.45–0.55 and the strict trio value is already near 5.5, a large C22:4 tail credit can push the final omega too high.  This pass caps the credit contribution in that narrow shape regime instead of globally weakening C22 correction.
+
+On the committed full historical regression, this removes all `abs_delta > 0.5` rows while keeping the mean error and RMSE lower than the previous run.  The implementation is still conservative: it changes only bounded correction layers after peak matching/integration, and the diagnostics retain strict/final spread so the suspicious cases remain visible.
