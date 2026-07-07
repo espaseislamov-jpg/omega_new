@@ -4006,6 +4006,8 @@ class ChromatogramApp:
         self.matched_targets_df = pd.DataFrame()
         self.current_rt_shift = 0.0
         self.selected_target_code = None
+        self.manual_start_var = tk.StringVar(value="")
+        self.manual_end_var = tk.StringVar(value="")
 
         self.status_var = tk.StringVar(value="Выбери CSV-файл.")
         self.file_var = tk.StringVar(value="Файл не выбран")
@@ -4104,6 +4106,17 @@ class ChromatogramApp:
         self.tree.configure(yscrollcommand=peaks_scroll.set)
         self.tree.bind("<<TreeviewSelect>>", self.handle_target_selection)
 
+        manual_frame = ttk.LabelFrame(sidebar, text="Ручная интеграция", padding=(8, 8))
+        manual_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(manual_frame, text="Start RT").grid(row=0, column=0, sticky="w")
+        ttk.Entry(manual_frame, textvariable=self.manual_start_var, width=12).grid(row=0, column=1, sticky="ew", padx=(6, 10))
+        ttk.Label(manual_frame, text="End RT").grid(row=0, column=2, sticky="w")
+        ttk.Entry(manual_frame, textvariable=self.manual_end_var, width=12).grid(row=0, column=3, sticky="ew", padx=(6, 0))
+        ttk.Button(manual_frame, text="Взять текущие", command=self.load_selected_integration_bounds).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0), padx=(0, 6))
+        ttk.Button(manual_frame, text="Применить", command=self.apply_manual_integration).grid(row=1, column=2, columnspan=2, sticky="ew", pady=(8, 0))
+        manual_frame.columnconfigure(1, weight=1)
+        manual_frame.columnconfigure(3, weight=1)
+
         status = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 4))
         status.pack(fill="x")
         self.update_batch_navigation()
@@ -4166,9 +4179,88 @@ class ChromatogramApp:
     def handle_target_selection(self, event=None):
         selection = self.tree.selection()
         self.selected_target_code = selection[0] if selection else None
+        self.load_selected_integration_bounds(silent=True)
         if self.df_processed is not None:
             self.update_plot()
             return
+
+    def load_selected_integration_bounds(self, silent: bool = False):
+        if not self.selected_target_code or self.matched_targets_df.empty:
+            self.manual_start_var.set("")
+            self.manual_end_var.set("")
+            if not silent:
+                self.status_var.set("Выбери пик в таблице перед ручной интеграцией.")
+            return
+
+        row = self.matched_targets_df[self.matched_targets_df["code"] == self.selected_target_code]
+        if row.empty:
+            self.manual_start_var.set("")
+            self.manual_end_var.set("")
+            return
+        start_x = pd.to_numeric(row["integration_start_x"], errors="coerce").iloc[0]
+        end_x = pd.to_numeric(row["integration_end_x"], errors="coerce").iloc[0]
+        self.manual_start_var.set("" if not np.isfinite(start_x) else f"{float(start_x):.5f}")
+        self.manual_end_var.set("" if not np.isfinite(end_x) else f"{float(end_x):.5f}")
+        if not silent:
+            self.status_var.set(f"Границы {self.selected_target_code} загружены для ручной правки.")
+
+    def apply_manual_integration(self):
+        if self.df_processed is None or self.matched_targets_df.empty:
+            messagebox.showwarning("Ручная интеграция", "Сначала открой CSV и выбери образец.", parent=self.root)
+            return
+        if not self.selected_target_code:
+            messagebox.showwarning("Ручная интеграция", "Сначала выбери пик в таблице справа.", parent=self.root)
+            return
+
+        try:
+            start_x = float(str(self.manual_start_var.get()).replace(",", "."))
+            end_x = float(str(self.manual_end_var.get()).replace(",", "."))
+        except ValueError:
+            messagebox.showerror("Ручная интеграция", "Start RT и End RT должны быть числами.", parent=self.root)
+            return
+        if not (np.isfinite(start_x) and np.isfinite(end_x) and end_x > start_x):
+            messagebox.showerror("Ручная интеграция", "End RT должен быть больше Start RT.", parent=self.root)
+            return
+
+        x_col = _get_x_column_name(self.df_processed)
+        x = self.df_processed[x_col].to_numpy(dtype=float)
+        y = self.df_processed["y_corrected"].to_numpy(dtype=float)
+        if start_x < float(np.nanmin(x)) or end_x > float(np.nanmax(x)):
+            messagebox.showerror("Ручная интеграция", "Границы вне диапазона текущей хроматограммы.", parent=self.root)
+            return
+
+        start_idx = int(np.searchsorted(x, start_x, side="left"))
+        end_idx = int(np.searchsorted(x, end_x, side="right") - 1)
+        start_idx = max(0, min(start_idx, len(x) - 2))
+        end_idx = max(start_idx + 1, min(end_idx, len(x) - 1))
+        segment_y = np.clip(y[start_idx:end_idx + 1], 0.0, None)
+        segment_x = x[start_idx:end_idx + 1]
+        area = float(np.trapezoid(segment_y, segment_x))
+        apex_idx = int(start_idx + np.argmax(segment_y))
+
+        row_mask = self.matched_targets_df["code"] == self.selected_target_code
+        if not row_mask.any():
+            messagebox.showerror("Ручная интеграция", f"Пик {self.selected_target_code} не найден в таблице.", parent=self.root)
+            return
+        row_idx = self.matched_targets_df.index[row_mask][0]
+        old_status = str(self.matched_targets_df.at[row_idx, "status"] or "")
+        manual_status = old_status if "manual" in old_status else f"{old_status}_manual" if old_status else "manual"
+        self.matched_targets_df.at[row_idx, "integration_start_x"] = float(x[start_idx])
+        self.matched_targets_df.at[row_idx, "integration_end_x"] = float(x[end_idx])
+        self.matched_targets_df.at[row_idx, "found_rt"] = float(x[apex_idx])
+        self.matched_targets_df.at[row_idx, "area"] = area
+        self.matched_targets_df.at[row_idx, "matched_peak_id"] = np.nan
+        self.matched_targets_df.at[row_idx, "match_score"] = np.nan
+        self.matched_targets_df.at[row_idx, "status"] = manual_status
+        self.matched_targets_df = _recompute_matched_percent_area(self.matched_targets_df)
+        self.selected_target_code = str(self.selected_target_code)
+        self.refresh_peaks()
+        if self.selected_target_code in self.tree.get_children():
+            self.tree.selection_set(self.selected_target_code)
+            self.tree.focus(self.selected_target_code)
+        self.status_var.set(
+            f"Ручная интеграция {self.selected_target_code}: {x[start_idx]:.5f}–{x[end_idx]:.5f}, area {area:.4f}"
+        )
 
     def handle_batch_tree_selection(self, event=None):
         if self._batch_tree_syncing or self.batch_tree is None:
@@ -4226,7 +4318,15 @@ class ChromatogramApp:
                 omega_report = batch.get("omega", {}).get("omega3_trio", np.nan)
             value = omega_report if omega_report is not None else np.nan
             value_text = f"{value:.4f}" if np.isfinite(value) else ""
-            rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text))
+            confidence = batch.get("confidence") if isinstance(batch.get("confidence"), dict) else {}
+            confidence_score = confidence.get("score", np.nan)
+            confidence_label = confidence.get("label", "")
+            confidence_text = (
+                f"{int(round(confidence_score))}/100 {confidence_label}".strip()
+                if np.isfinite(confidence_score)
+                else ""
+            )
+            rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text, confidence_text))
         return rows
 
     def _populate_batch_tree_widget(self, tree: ttk.Treeview, process_all: bool = False):
@@ -4235,8 +4335,10 @@ class ChromatogramApp:
         selected_iid = str(self.current_batch_index) if self.loaded_batches else None
         for item_id in tree.get_children():
             tree.delete(item_id)
-        for index, sample_name, value_text in self.build_batch_results_rows(process_all=process_all):
-            tree.insert("", "end", iid=str(index), values=(sample_name, value_text))
+        show_confidence = "confidence" in set(tree["columns"])
+        for index, sample_name, value_text, confidence_text in self.build_batch_results_rows(process_all=process_all):
+            values = (sample_name, value_text, confidence_text) if show_confidence else (sample_name, value_text)
+            tree.insert("", "end", iid=str(index), values=values)
         if selected_iid is not None and tree.exists(selected_iid):
             self._batch_tree_syncing = True
             tree.selection_set(selected_iid)
@@ -4306,12 +4408,14 @@ class ChromatogramApp:
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
-        columns = ("sample_name", "omega_value")
+        columns = ("sample_name", "omega_value", "confidence")
         self.batch_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18, selectmode="extended")
         self.batch_results_tree.heading("sample_name", text="Номер образца")
         self.batch_results_tree.heading("omega_value", text="Значение")
+        self.batch_results_tree.heading("confidence", text="Уверенность")
         self.batch_results_tree.column("sample_name", width=300, anchor="w")
-        self.batch_results_tree.column("omega_value", width=140, anchor="center")
+        self.batch_results_tree.column("omega_value", width=120, anchor="center")
+        self.batch_results_tree.column("confidence", width=140, anchor="center")
         self.batch_results_tree.pack(side="left", fill="both", expand=True)
 
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.batch_results_tree.yview)
