@@ -308,6 +308,75 @@ def classify_result(row: dict) -> tuple[str, str, str]:
     return flag, outlier_class, ",".join(reasons)
 
 
+
+def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
+    """Return a reference-free high-error risk estimate for patient-result review.
+
+    The rule set is a deliberately small surrogate judge trained from the current
+    regression diagnostics to catch the scary `abs(delta) > 0.5` failures. It does
+    not change the omega value and it never uses the manual reference at runtime.
+    """
+    reasons: list[str] = []
+    risk_score = 0
+    predicted_direction = "unknown"
+
+    c22_ratio = _safe_float(row.get("omega_c22_reference_ratio"))
+    c22_dha_asymmetry = _safe_float(row.get("C22_6_asymmetry"))
+    confidence = _safe_float(row.get("confidence"))
+    c20_4_asymmetry = _safe_float(row.get("C20_4N6_asymmetry"))
+    omega_value = _safe_float(row.get("omega_omega3_trio_corrected", row.get("calculated")))
+    dha_area = _safe_float(row.get("omega_dha_area"))
+
+    if np.isfinite(c22_ratio) and c22_ratio <= 1.7091:
+        if np.isfinite(c22_dha_asymmetry) and c22_dha_asymmetry > 1.7401:
+            risk_score = max(risk_score, 92)
+            predicted_direction = "mixed_c22_boundary"
+            reasons.append("c22_low_ratio_with_asymmetric_dha")
+        elif (
+            np.isfinite(confidence)
+            and confidence <= 47.0
+            and np.isfinite(c20_4_asymmetry)
+            and c20_4_asymmetry <= 1.2964
+        ):
+            risk_score = max(risk_score, 82)
+            predicted_direction = "overestimated"
+            reasons.append("low_confidence_c20_shape_exception")
+    elif (
+        np.isfinite(c22_ratio)
+        and c22_ratio > 1.7091
+        and np.isfinite(omega_value)
+        and omega_value > 3.4709
+        and np.isfinite(dha_area)
+        and dha_area <= 695.2813
+    ):
+        risk_score = max(risk_score, 90)
+        predicted_direction = "c22_cluster_extreme"
+        reasons.append("high_c22_ratio_low_dha_area")
+
+    # Add smaller supporting evidence without allowing it to create a high-risk
+    # label by itself. This keeps the judge focused on patterns that caught all
+    # current >0.5 misses while avoiding a blanket REVIEW on the whole corpus.
+    if str(row.get("baseline_mode", "")) not in {"", "chebyshev"}:
+        risk_score += 5
+        reasons.append("baseline_fallback")
+    if np.isfinite(confidence) and confidence < 60:
+        risk_score += 5
+        reasons.append("low_or_medium_confidence")
+    if "cluster_overlap_or_fit" in str(row.get("review_reasons", "")):
+        risk_score += 4
+        reasons.append("cluster_overlap_or_fit")
+
+    risk_score = int(min(100, risk_score))
+    if risk_score >= 85:
+        band = "HIGH_RISK_GT_0_5"
+    elif risk_score >= 70:
+        band = "WATCH_NEAR_LIMIT"
+    elif risk_score >= 35:
+        band = "LOW_RISK_REVIEW_CONTEXT"
+    else:
+        band = "LOW_RISK"
+    return risk_score, band, predicted_direction, ",".join(dict.fromkeys(reasons))
+
 def _annotated_from_processed(processed: pd.DataFrame, reference_targets: pd.DataFrame, baseline_mode: str) -> dict:
     return metrics.annotate_result(pipeline.process_from_baseline(processed, reference_targets), baseline_mode=baseline_mode)
 
@@ -336,6 +405,21 @@ def evaluate_variants(dataframe: pd.DataFrame, reference_targets: pd.DataFrame, 
     return variants
 
 
+def _variant_safety_row(variant: dict) -> dict:
+    features = _extract_result_features(variant)
+    row = {**features, **_judge_features(variant), "delta": np.nan, "abs_delta": np.nan}
+    review_flag, outlier_class, review_reasons = classify_result(row)
+    row["review_flag"] = review_flag
+    row["outlier_class"] = outlier_class
+    row["review_reasons"] = review_reasons
+    safety_score, safety_band, safety_direction, safety_reasons = safety_judge(row)
+    row["safety_judge_score"] = safety_score
+    row["safety_judge_band"] = safety_band
+    row["safety_judge_direction"] = safety_direction
+    row["safety_judge_reasons"] = safety_reasons
+    return row
+
+
 def select_variant(variants: list[dict], reference: float, selector_mode: str) -> dict:
     valid = [variant for variant in variants if np.isfinite(_safe_float(variant.get("omega_report")))]
     if not valid:
@@ -346,8 +430,23 @@ def select_variant(variants: list[dict], reference: float, selector_mode: str) -
         # choosing among already available processing variants. Do not use for
         # production patient results because it uses the manual reference.
         return min(valid, key=lambda variant: abs(_safe_float(variant.get("omega_report")) - float(reference)))
+    if selector_mode == "safety":
+        # Reference-free production-style selection: prefer a variant that avoids
+        # the high-risk safety-judge patterns, then prefer higher confidence and
+        # lower strict/final correction spread. This is intentionally conservative
+        # and never looks at the manual Excel value.
+        def key(variant: dict) -> tuple[float, float, float, float]:
+            row = _variant_safety_row(variant)
+            safety_score = _safe_float(row.get("safety_judge_score"), 100.0)
+            confidence = _safe_float(row.get("confidence"), 0.0)
+            corrected = _safe_float(row.get("omega_omega3_trio"))
+            strict = _safe_float(row.get("omega_omega3_trio_strict"))
+            spread = abs(corrected - strict) if np.isfinite(corrected) and np.isfinite(strict) else 999.0
+            # current pipeline wins ties to keep behavior stable.
+            current_penalty = 0.0 if variant.get("variant_name") == "current_pipeline" else 0.05
+            return (safety_score, -confidence, spread, current_penalty)
+        return min(valid, key=key)
     return valid[0]
-
 
 def build_audit_row(date: str, xlsx_path: Path, csv_path: Path, refs: list[ExcelReference], batches: list[BatchRecord]) -> dict:
     ref_tokens = {ref.token for ref in refs}
@@ -480,7 +579,7 @@ def run_current_engine(
                 "reference": float(ref.reference),
             }
             try:
-                variants = evaluate_variants(batch.dataframe, reference_targets, mode="variants" if selector_mode == "oracle" else "current")
+                variants = evaluate_variants(batch.dataframe, reference_targets, mode="variants" if selector_mode in {"oracle", "safety"} else "current")
                 selected = select_variant(variants, ref.reference, selector_mode=selector_mode)
             except Exception as exc:
                 error_row = {**base_row, "error": f"{type(exc).__name__}: {exc}"}
@@ -490,11 +589,15 @@ def run_current_engine(
 
             for variant in variants:
                 features = _extract_result_features(variant) if "variant_error" not in variant else {}
+                variant_safety = _variant_safety_row(variant) if "variant_error" not in variant else {}
                 variant_rows.append({
                     **base_row,
                     "variant_name": variant.get("variant_name", ""),
                     "variant_error": variant.get("variant_error", ""),
                     **features,
+                    "variant_safety_judge_score": variant_safety.get("safety_judge_score"),
+                    "variant_safety_judge_band": variant_safety.get("safety_judge_band"),
+                    "variant_safety_judge_reasons": variant_safety.get("safety_judge_reasons"),
                     "delta": _safe_float(features.get("calculated")) - float(ref.reference) if features else np.nan,
                 })
 
@@ -514,6 +617,11 @@ def run_current_engine(
             out_row["review_flag"] = review_flag
             out_row["outlier_class"] = outlier_class
             out_row["review_reasons"] = review_reasons
+            safety_score, safety_band, safety_direction, safety_reasons = safety_judge(out_row)
+            out_row["safety_judge_score"] = safety_score
+            out_row["safety_judge_band"] = safety_band
+            out_row["safety_judge_direction"] = safety_direction
+            out_row["safety_judge_reasons"] = safety_reasons
             rows.append(out_row)
             if debug_dir is not None and np.isfinite(out_row["abs_delta"]) and out_row["abs_delta"] > debug_threshold:
                 dump_debug(debug_dir, out_row, selected)
@@ -663,6 +771,10 @@ def build_diagnostic_tables(results: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
             "rt_shift": row.get("rt_shift"),
             "omega_c22_reference_ratio": row.get("omega_c22_reference_ratio"),
             "omega_c22_overintegration_debit_points": row.get("omega_c22_overintegration_debit_points"),
+            "safety_judge_score": row.get("safety_judge_score"),
+            "safety_judge_band": row.get("safety_judge_band"),
+            "safety_judge_direction": row.get("safety_judge_direction"),
+            "safety_judge_reasons": row.get("safety_judge_reasons"),
         }
         sample_rows.append(sample_key)
         for code in DIAGNOSTIC_TARGET_CODES:
@@ -763,6 +875,41 @@ def write_reports(
         if {"review_flag", "outlier_class"}.issubset(results.columns)
         else pd.DataFrame()
     )
+    high_error = results["abs_delta"] > 0.5 if "abs_delta" in results else pd.Series(dtype=bool)
+    judge_positive = results["safety_judge_band"].eq("HIGH_RISK_GT_0_5") if "safety_judge_band" in results else pd.Series(dtype=bool)
+    safety_summary = pd.DataFrame([
+        {
+            "metric": "HIGH_RISK_GT_0_5 catch rate",
+            "value": f"{int((judge_positive & high_error).sum())}/{int(high_error.sum())}",
+        },
+        {
+            "metric": "HIGH_RISK_GT_0_5 review load",
+            "value": f"{int(judge_positive.sum())}/{len(results)}",
+        },
+        {
+            "metric": "HIGH_RISK false positives",
+            "value": str(int((judge_positive & ~high_error).sum())),
+        },
+        {
+            "metric": "HIGH_RISK missed >0.5",
+            "value": str(int((~judge_positive & high_error).sum())),
+        },
+    ]) if "safety_judge_band" in results else pd.DataFrame()
+    safety_by_band = (
+        results.groupby("safety_judge_band", dropna=False)
+        .agg(
+            n=("safety_judge_band", "size"),
+            MAE=("abs_delta", "mean"),
+            max_abs=("abs_delta", "max"),
+            gt_0_5=("abs_delta", lambda values: int((values > 0.5).sum())),
+            within_0_5=("abs_delta", lambda values: int((values <= 0.5).sum())),
+        )
+        .reset_index()
+        .sort_values(["max_abs", "MAE"], ascending=[False, False])
+        if "safety_judge_band" in results
+        else pd.DataFrame()
+    )
+
     report_lines = [
         "# Omega regression report",
         "",
@@ -789,13 +936,21 @@ def write_reports(
         "",
         _markdown_table(review_summary),
         "",
+        "## Safety judge",
+        "",
+        _markdown_table(safety_summary),
+        "",
+        "### Safety judge by band",
+        "",
+        _markdown_table(safety_by_band),
+        "",
         "## Diagnostic issue summary",
         "",
         _markdown_table(issue_summary),
         "",
         "## Top diagnostic samples",
         "",
-        _markdown_table(sample_diagnostics.sort_values("abs_delta", ascending=False).head(25)[[col for col in ["date", "sample_no", "sample_name", "reference", "calculated", "delta", "confidence", "diagnostic_bucket", "diagnostic_reasons"] if col in sample_diagnostics.columns]]),
+        _markdown_table(sample_diagnostics.sort_values("abs_delta", ascending=False).head(25)[[col for col in ["date", "sample_no", "sample_name", "reference", "calculated", "delta", "confidence", "safety_judge_band", "safety_judge_score", "safety_judge_reasons", "diagnostic_bucket", "diagnostic_reasons"] if col in sample_diagnostics.columns]]),
         "",
         "## Outliers > 0.5",
         "",
@@ -811,7 +966,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--reference", type=Path, default=DEFAULT_REFERENCE_PATH)
     parser.add_argument("--out", type=Path, default=PROJECT_DIR / "omega_regression_current.xlsx")
-    parser.add_argument("--selector-mode", choices=["current", "oracle"], default="current")
+    parser.add_argument("--selector-mode", choices=["current", "safety", "oracle"], default="current")
     parser.add_argument("--debug-dir", type=Path, default=None)
     parser.add_argument("--debug-threshold", type=float, default=0.5)
     args = parser.parse_args(list(argv) if argv is not None else None)
@@ -851,7 +1006,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 [
                     "python omega_regression.py",
                     f"--data-dir {args.data_dir}",
-                    *(["--selector-mode oracle"] if args.selector_mode == "oracle" else []),
+                    *([f"--selector-mode {args.selector_mode}"] if args.selector_mode != "current" else []),
                     f"--out {args.out}",
                     *(["--debug-dir", str(args.debug_dir), "--debug-threshold", str(args.debug_threshold)] if args.debug_dir is not None else []),
                 ]
