@@ -33,6 +33,28 @@ CHROMATOPY_TARGET_CODES = {
 _CHROMATOPY_FUNCTIONS = None
 
 
+def _chromatopy_fid_module_path() -> Path:
+    try:
+        distribution = importlib.metadata.distribution("chromatopy")
+        module_path = Path(distribution.locate_file("chromatopy/FID/FID_Integration_functions.py"))
+        if module_path.exists():
+            return module_path
+    except importlib.metadata.PackageNotFoundError:
+        pass
+
+    package_spec = importlib.util.find_spec("chromatopy")
+    if package_spec is not None and package_spec.submodule_search_locations:
+        for package_dir in package_spec.submodule_search_locations:
+            module_path = Path(package_dir) / "FID" / "FID_Integration_functions.py"
+            if module_path.exists():
+                return module_path
+
+    raise ImportError(
+        "Cannot locate ChromatoPy FID_Integration_functions.py. "
+        "Install chromatopy or rebuild omega_v2 with chromatopy bundled."
+    )
+
+
 def _load_chromatopy_functions():
     global _CHROMATOPY_FUNCTIONS
     if _CHROMATOPY_FUNCTIONS is not None:
@@ -41,8 +63,7 @@ def _load_chromatopy_functions():
     try:
         from chromatopy.FID.FID_Integration_functions import fit_gaussians, smoother
     except Exception:
-        distribution = importlib.metadata.distribution("chromatopy")
-        module_path = Path(distribution.locate_file("chromatopy/FID/FID_Integration_functions.py"))
+        module_path = _chromatopy_fid_module_path()
         spec = importlib.util.spec_from_file_location("_omega_chromatopy_fid_functions", module_path)
         if spec is None or spec.loader is None:
             raise ImportError(f"Cannot load ChromatoPy FID functions from {module_path}")
