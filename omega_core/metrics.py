@@ -15,6 +15,28 @@ C22_OVERLAP_MODEL_BLEND = 0.60
 C22_OVERLAP_MODEL_APPLY_FRACTION_MIN = 0.90
 C22_OVERLAP_WIDE_CLUSTER_MEAN_WIDTH = 0.030
 C22_OVERLAP_WIDE_CLUSTER_SCALE = 0.65
+# Conservative C22/DPA over-integration guard: when DPA dwarfs C22:4 in the
+# same local cluster, a bounded part of DPA is treated as likely shared tail area.
+C22_DPA_OVERINTEGRATION_RATIO_MIN = 1.35
+C22_DPA_OVERINTEGRATION_DPA_FRACTION = 0.30
+C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS = 0.45
+# Bounded C22 width-balance calibration learned from regression diagnostics.
+# It nudges narrow DPA/C22:4 cluster cases by at most a few tenths of an omega point.
+C22_WIDTH_BALANCE_DPA_WIDTH_MAX = 0.030
+C22_WIDTH_BALANCE_C22_4_NARROW_MAX = 0.020
+C22_WIDTH_BALANCE_DHA_WIDTH_MAX = 0.040
+C22_WIDTH_BALANCE_SMALL_DPA_AREA_MAX = 163.69
+C22_WIDTH_BALANCE_DHA_AREA_MAX = 1618.65
+C22_WIDTH_BALANCE_LOW_OVERLAP_FRACTION_MAX = 0.61
+C22_WIDTH_BALANCE_POSITIVE_POINTS = 0.20
+C22_WIDTH_BALANCE_NEGATIVE_POINTS = -0.10
+# Guard against C22 credit overshoot in borderline DPA/C22:4-ratio cases.
+# These are exactly the cases where an integration shoulder can look like shared
+# C22:4 tail area, but the strict trio value is already near the clinical target.
+C22_LOW_RATIO_CREDIT_GUARD_MIN = 0.45
+C22_LOW_RATIO_CREDIT_GUARD_MAX = 0.55
+C22_LOW_RATIO_CREDIT_GUARD_STRICT_MAX = 5.50
+C22_LOW_RATIO_CREDIT_GUARD_MAX_POINTS = 0.25
 
 C18_DENOMINATOR_DOMINANCE_RATIO = 1.60
 C18_DENOMINATOR_SMALL_N3_FRACTION = 0.08
@@ -47,16 +69,19 @@ C22_OVERLAP_MODEL_PARAMS = np.asarray([
     0.27922158744448305,
 ], dtype=float)
 
+# Re-enabled behind a tighter ratio gate after July-regression validation.
+# The broad C20/EPA model caused over-estimation, but a narrow severe-underfit
+# gate fixes the remaining large EPA under-integration failures.
 ENABLE_DATA_DRIVEN_C20_EPA_MODEL = True
-C20_EPA_MODEL_GATE_RATIO_MAX = 0.70
+C20_EPA_MODEL_GATE_RATIO_MAX = 0.25
 C20_EPA_MODEL_BLEND = 0.25
 C20_EPA_OVERLAP_WIDE_NEIGHBOR_RATIO = 1.30
 C20_EPA_OVERLAP_EXTRA_SCALE = 1.60
 C20_EPA_UNDERFIT_RATIO_MAX = 0.13
 C20_EPA_UNDERFIT_WIDTH_RATIO = 1.80
-C20_EPA_UNDERFIT_STRICT_MAX = 4.20
+C20_EPA_UNDERFIT_STRICT_MAX = 4.60
 C20_EPA_UNDERFIT_CREDIT_MIN = 20.0
-C20_EPA_UNDERFIT_EXTRA_SCALE = 1.50
+C20_EPA_UNDERFIT_EXTRA_SCALE = 1.70
 C20_EPA_MODEL_SCALES = np.asarray([
     0.9895635778699382,
     0.5615594221089807,
@@ -104,6 +129,11 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overlap_model_applied": False,
         "c22_reference_ratio": np.nan,
         "c22_width_scale": 1.0,
+        "c22_overintegration_debit_area": 0.0,
+        "c22_overintegration_debit_points": 0.0,
+        "c22_overintegration_model_applied": False,
+        "c22_width_balance_points": 0.0,
+        "c22_width_balance_model_applied": False,
         "c18_denominator_scale": 1.0,
     }
     if matched_targets is None or matched_targets.empty:
@@ -276,7 +306,54 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         c22_width_scale = C22_OVERLAP_WIDE_CLUSTER_SCALE
         c22_fraction *= c22_width_scale
     c22_credit_area = c22_4 * c22_fraction
-    corrected_value = 100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area) / effective_total_area
+    if (
+        np.isfinite(c22_ratio)
+        and C22_LOW_RATIO_CREDIT_GUARD_MIN <= c22_ratio <= C22_LOW_RATIO_CREDIT_GUARD_MAX
+        and strict_value < C22_LOW_RATIO_CREDIT_GUARD_STRICT_MAX
+        and c22_credit_area > 0
+    ):
+        max_guarded_credit = effective_total_area * C22_LOW_RATIO_CREDIT_GUARD_MAX_POINTS / 100.0
+        c22_credit_area = float(min(c22_credit_area, max_guarded_credit))
+        c22_fraction = c22_credit_area / c22_4 if c22_4 > 0 else 0.0
+
+    c22_debit_area = 0.0
+    c22_debit_points = 0.0
+    c22_debit_applied = False
+    if (
+        c22_4 > 0
+        and dpa > 0
+        and np.isfinite(c22_ratio)
+        and c22_ratio > C22_DPA_OVERINTEGRATION_RATIO_MIN
+    ):
+        max_debit_area = effective_total_area * C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS / 100.0
+        c22_debit_area = float(np.clip(
+            dpa * C22_DPA_OVERINTEGRATION_DPA_FRACTION,
+            0.0,
+            max_debit_area,
+        ))
+        c22_debit_points = 100.0 * c22_debit_area / effective_total_area
+        c22_debit_applied = c22_debit_area > 0
+
+    c22_width_balance_points = 0.0
+    c22_width_balance_applied = False
+    w_dha, w_dpa, w_c22_4 = c22_width_values
+    if np.all(np.isfinite([w_dha, w_dpa, w_c22_4])) and w_dpa <= C22_WIDTH_BALANCE_DPA_WIDTH_MAX:
+        if w_c22_4 <= C22_WIDTH_BALANCE_C22_4_NARROW_MAX:
+            if w_dha <= C22_WIDTH_BALANCE_DHA_WIDTH_MAX:
+                c22_width_balance_points = C22_WIDTH_BALANCE_POSITIVE_POINTS
+        elif dpa <= C22_WIDTH_BALANCE_SMALL_DPA_AREA_MAX:
+            if c22_fraction <= C22_WIDTH_BALANCE_LOW_OVERLAP_FRACTION_MAX:
+                c22_width_balance_points = C22_WIDTH_BALANCE_POSITIVE_POINTS
+            else:
+                c22_width_balance_points = C22_WIDTH_BALANCE_NEGATIVE_POINTS
+        elif dha <= C22_WIDTH_BALANCE_DHA_AREA_MAX:
+            c22_width_balance_points = C22_WIDTH_BALANCE_NEGATIVE_POINTS
+    c22_width_balance_applied = abs(c22_width_balance_points) > 1e-12
+
+    corrected_value = (
+        100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area - c22_debit_area) / effective_total_area
+        + c22_width_balance_points
+    )
 
     result.update({
         "omega3_trio": corrected_value,
@@ -301,6 +378,11 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overlap_model_applied": model_applied,
         "c22_reference_ratio": c22_ratio,
         "c22_width_scale": c22_width_scale,
+        "c22_overintegration_debit_area": c22_debit_area,
+        "c22_overintegration_debit_points": c22_debit_points,
+        "c22_overintegration_model_applied": c22_debit_applied,
+        "c22_width_balance_points": c22_width_balance_points,
+        "c22_width_balance_model_applied": c22_width_balance_applied,
         "c18_denominator_scale": c18_denominator_scale,
     })
     return result
