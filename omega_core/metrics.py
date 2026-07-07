@@ -30,6 +30,13 @@ C22_WIDTH_BALANCE_DHA_AREA_MAX = 1618.65
 C22_WIDTH_BALANCE_LOW_OVERLAP_FRACTION_MAX = 0.61
 C22_WIDTH_BALANCE_POSITIVE_POINTS = 0.20
 C22_WIDTH_BALANCE_NEGATIVE_POINTS = -0.10
+# Guard against C22 credit overshoot in borderline DPA/C22:4-ratio cases.
+# These are exactly the cases where an integration shoulder can look like shared
+# C22:4 tail area, but the strict trio value is already near the clinical target.
+C22_LOW_RATIO_CREDIT_GUARD_MIN = 0.45
+C22_LOW_RATIO_CREDIT_GUARD_MAX = 0.55
+C22_LOW_RATIO_CREDIT_GUARD_STRICT_MAX = 5.50
+C22_LOW_RATIO_CREDIT_GUARD_MAX_POINTS = 0.25
 
 C18_DENOMINATOR_DOMINANCE_RATIO = 1.60
 C18_DENOMINATOR_SMALL_N3_FRACTION = 0.08
@@ -62,19 +69,19 @@ C22_OVERLAP_MODEL_PARAMS = np.asarray([
     0.27922158744448305,
 ], dtype=float)
 
-# Disabled by default after July-regression validation: this overlap-credit
-# model was the dominant source of large C20/EPA over-estimation outliers.
-# Keep the parameters below for future bounded/gated replacement experiments.
-ENABLE_DATA_DRIVEN_C20_EPA_MODEL = False
-C20_EPA_MODEL_GATE_RATIO_MAX = 0.70
+# Re-enabled behind a tighter ratio gate after July-regression validation.
+# The broad C20/EPA model caused over-estimation, but a narrow severe-underfit
+# gate fixes the remaining large EPA under-integration failures.
+ENABLE_DATA_DRIVEN_C20_EPA_MODEL = True
+C20_EPA_MODEL_GATE_RATIO_MAX = 0.25
 C20_EPA_MODEL_BLEND = 0.25
 C20_EPA_OVERLAP_WIDE_NEIGHBOR_RATIO = 1.30
 C20_EPA_OVERLAP_EXTRA_SCALE = 1.60
 C20_EPA_UNDERFIT_RATIO_MAX = 0.13
 C20_EPA_UNDERFIT_WIDTH_RATIO = 1.80
-C20_EPA_UNDERFIT_STRICT_MAX = 4.20
+C20_EPA_UNDERFIT_STRICT_MAX = 4.60
 C20_EPA_UNDERFIT_CREDIT_MIN = 20.0
-C20_EPA_UNDERFIT_EXTRA_SCALE = 1.50
+C20_EPA_UNDERFIT_EXTRA_SCALE = 1.70
 C20_EPA_MODEL_SCALES = np.asarray([
     0.9895635778699382,
     0.5615594221089807,
@@ -299,6 +306,15 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         c22_width_scale = C22_OVERLAP_WIDE_CLUSTER_SCALE
         c22_fraction *= c22_width_scale
     c22_credit_area = c22_4 * c22_fraction
+    if (
+        np.isfinite(c22_ratio)
+        and C22_LOW_RATIO_CREDIT_GUARD_MIN <= c22_ratio <= C22_LOW_RATIO_CREDIT_GUARD_MAX
+        and strict_value < C22_LOW_RATIO_CREDIT_GUARD_STRICT_MAX
+        and c22_credit_area > 0
+    ):
+        max_guarded_credit = effective_total_area * C22_LOW_RATIO_CREDIT_GUARD_MAX_POINTS / 100.0
+        c22_credit_area = float(min(c22_credit_area, max_guarded_credit))
+        c22_fraction = c22_credit_area / c22_4 if c22_4 > 0 else 0.0
 
     c22_debit_area = 0.0
     c22_debit_points = 0.0
