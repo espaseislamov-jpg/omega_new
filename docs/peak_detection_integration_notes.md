@@ -95,3 +95,17 @@ correction. The cap is intentionally much smaller than the clinical tolerance ba
 (`±0.5`) and the desired inter-operator band (`±0.3`). The remaining large misses
 should still be investigated at the peak-boundary/deconvolution level rather than
 by increasing this calibration.
+
+## Boundary finding lesson from RT-corridor experiment
+
+The stable retention-time observation is real and useful, but a hard midpoint clamp
+between neighboring target RTs is too blunt as a default production rule. I added an
+experimental `OMEGA_TARGET_RT_CORRIDOR_GUARD=1` path that clips C18/C20/C22 target
+intervals to midpoint corridors derived from corrected target RTs. On the current
+corpus it reduced some left/right shoulder absorption but worsened total MAE, which
+means the correct fix is not a universal clamp.
+
+The next boundary fix should be local and evidence-based: for each high-risk C22/C20
+cluster, evaluate valley depth, derivative sign changes, and area conservation before
+moving boundaries. Stable target RTs should act as priors and guardrails, not as hard
+integration endpoints.
