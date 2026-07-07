@@ -40,6 +40,9 @@ FINAL_BOUNDARY_FALLBACK_MAX_CHANGED_PEAKS = 6
 FINAL_BOUNDARY_FALLBACK_MAX_AREA_RATIO = 1.080
 FINAL_BOUNDARY_FALLBACK_MAX_OMEGA_SHIFT = 0.100
 FINAL_BOUNDARY_FALLBACK_MAX_STRICT_SPREAD_INCREASE = 0.080
+ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "0").strip() == "1"
+TARGET_RT_CORRIDOR_GUARD_CODES = {"C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0", "C20:4N6", "C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"}
+TARGET_RT_CORRIDOR_MIN_WIDTH = 0.004
 JUDGE_DECISIONS_ATTR = "judge_decisions"
 SMALL_PEAK_SHARP_SEARCH_HALF_WINDOW = 0.070
 SMALL_PEAK_SHARP_APEX_SEARCH_RADIUS = 0.012
@@ -1400,6 +1403,104 @@ def expand_final_peak_boundaries(
     return _with_judge_decisions(accepted_frame, decisions)
 
 
+
+def enforce_target_rt_corridors(
+    df: pd.DataFrame,
+    matched_targets: pd.DataFrame,
+) -> pd.DataFrame:
+    """Clip integration intervals to RT corridors derived from target order.
+
+    Boundary expansions and local fits can occasionally let one target absorb the
+    shoulder or middle of a neighboring target. For the stable C18/C20/C22 regions,
+    the corrected target RTs are much more stable than the discovered integration
+    width, so use midpoints between neighboring target RTs as hard split guards.
+    """
+    out = matched_targets.copy()
+    if (
+        not ENABLE_TARGET_RT_CORRIDOR_GUARD
+        or df is None or df.empty
+        or out is None or out.empty
+    ):
+        return out
+
+    x_col = _get_x_column_name(df)
+    x = df[x_col].to_numpy(dtype=float)
+    y = np.clip(df["y_corrected"].to_numpy(dtype=float), 0.0, None)
+    if len(x) < 4:
+        return out
+
+    work = out.copy()
+    for column in ["found_rt", "corrected_target_rt", "integration_start_x", "integration_end_x", "area"]:
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+    work["_corridor_center"] = work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"])
+    work = work.dropna(subset=["_corridor_center", "found_rt", "integration_start_x", "integration_end_x"]).sort_values("_corridor_center")
+    if len(work) < 2:
+        return out
+
+    ordered_indices = list(work.index)
+    centers = work["_corridor_center"].to_numpy(dtype=float)
+    decisions: list[dict] = []
+    for pos, row_idx in enumerate(ordered_indices):
+        code = str(work.at[row_idx, "code"])
+        if code not in TARGET_RT_CORRIDOR_GUARD_CODES:
+            continue
+        found_rt = float(work.at[row_idx, "found_rt"])
+        start_x = float(work.at[row_idx, "integration_start_x"])
+        end_x = float(work.at[row_idx, "integration_end_x"])
+        if not (np.isfinite(found_rt) and np.isfinite(start_x) and np.isfinite(end_x) and end_x > start_x):
+            continue
+
+        left_guard = -np.inf
+        right_guard = np.inf
+        if pos > 0 and np.isfinite(centers[pos - 1]):
+            left_guard = 0.5 * (centers[pos - 1] + centers[pos])
+        if pos < len(centers) - 1 and np.isfinite(centers[pos + 1]):
+            right_guard = 0.5 * (centers[pos] + centers[pos + 1])
+        if not (left_guard < found_rt < right_guard):
+            continue
+
+        new_start_x = max(start_x, left_guard) if np.isfinite(left_guard) else start_x
+        new_end_x = min(end_x, right_guard) if np.isfinite(right_guard) else end_x
+        if new_end_x - new_start_x < TARGET_RT_CORRIDOR_MIN_WIDTH or not (new_start_x < found_rt < new_end_x):
+            continue
+        if new_start_x <= start_x + 1e-9 and new_end_x >= end_x - 1e-9:
+            continue
+
+        start_idx = int(np.searchsorted(x, new_start_x, side="left"))
+        end_idx = int(np.searchsorted(x, new_end_x, side="right") - 1)
+        start_idx = max(0, min(start_idx, len(x) - 2))
+        end_idx = max(start_idx + 1, min(end_idx, len(x) - 1))
+        new_area = float(np.trapezoid(y[start_idx:end_idx + 1], x[start_idx:end_idx + 1]))
+        if not np.isfinite(new_area) or new_area <= 0:
+            continue
+
+        old_area = float(work.at[row_idx, "area"]) if np.isfinite(work.at[row_idx, "area"]) else np.nan
+        out.at[row_idx, "integration_start_x"] = float(x[start_idx])
+        out.at[row_idx, "integration_end_x"] = float(x[end_idx])
+        out.at[row_idx, "area"] = new_area
+        out.at[row_idx, "status"] = _append_status_suffix(out.at[row_idx, "status"], "rtcorridor")
+        decisions.append({
+            "judge": "target_rt_corridor_guard",
+            "candidate": "rtcorridor",
+            "decision": "accepted",
+            "reason": "clipped_to_target_midpoint_corridor",
+            "row_idx": int(row_idx),
+            "code": code,
+            "found_rt": found_rt,
+            "old_start_x": start_x,
+            "old_end_x": end_x,
+            "new_start_x": float(x[start_idx]),
+            "new_end_x": float(x[end_idx]),
+            "old_area": old_area,
+            "new_area": new_area,
+            "area_ratio": new_area / max(old_area, 1e-9) if np.isfinite(old_area) else np.nan,
+        })
+
+    if not decisions:
+        return out
+    out = _recompute_matched_percent_area(out)
+    return _with_judge_decisions(out, decisions)
+
 def refine_cluster_matches(
     processed: pd.DataFrame,
     peaks: pd.DataFrame,
@@ -1415,4 +1516,5 @@ def refine_cluster_matches(
     matched_targets = legacy_fit.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
     matched_targets = refine_small_peak_integrations(processed, matched_targets)
     matched_targets = expand_final_peak_boundaries(processed, matched_targets)
+    matched_targets = enforce_target_rt_corridors(processed, matched_targets)
     return peaks, matched_targets
