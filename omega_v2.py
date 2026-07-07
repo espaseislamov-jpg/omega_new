@@ -7,9 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+from omega_path_compat import configure_windows_path_compat
+
 APP_NAME = "omega_v2"
 MIN_PYTHON = (3, 10)
-REQUIREMENT_FILES = ("requirements.txt", "requirements-chromatopy.txt")
+REQUIREMENT_FILES = ("requirements.txt",)
 REQUIRED_MODULES = {
     "numpy": "numpy",
     "pandas": "pandas",
@@ -20,10 +22,10 @@ REQUIRED_MODULES = {
     "lmfit": "lmfit",
     "sklearn": "scikit-learn",
     "hdbscan": "hdbscan",
-    "chromatopy": "chromatopy",
 }
 OPTIONAL_MODULES = {
     "pyopenms": "pyopenms",
+    "chromatopy": "chromatopy",
 }
 
 
@@ -40,7 +42,15 @@ def _resource_path(relative: str) -> Path:
 
 def _missing_modules() -> list[str]:
     missing: list[str] = []
-    for module_name, package_name in {**REQUIRED_MODULES, **OPTIONAL_MODULES}.items():
+    for module_name, package_name in REQUIRED_MODULES.items():
+        if importlib.util.find_spec(module_name) is None:
+            missing.append(package_name)
+    return missing
+
+
+def _missing_optional_modules() -> list[str]:
+    missing: list[str] = []
+    for module_name, package_name in OPTIONAL_MODULES.items():
         if importlib.util.find_spec(module_name) is None:
             missing.append(package_name)
     return missing
@@ -73,15 +83,24 @@ def _install_requirements_if_needed() -> None:
             + ", ".join(still_missing)
         )
 
+    optional_missing = _missing_optional_modules()
+    if optional_missing:
+        print(
+            "[omega_v2] Optional Python packages are not installed: "
+            + ", ".join(optional_missing),
+            flush=True,
+        )
+
 
 def main() -> int:
     if sys.version_info < MIN_PYTHON:
         raise RuntimeError(
             f"{APP_NAME} requires Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; "
             f"current Python is {sys.version.split()[0]}"
-        )
+    )
 
     os.environ.setdefault("OMEGA_APP_NAME", APP_NAME)
+    configure_windows_path_compat()
     _install_requirements_if_needed()
     runpy.run_module("New_idea", run_name="__main__")
     return 0

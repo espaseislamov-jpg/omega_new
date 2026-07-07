@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -50,10 +51,69 @@ def native_safe_path(path: str | os.PathLike[str]) -> Path:
     return original
 
 
+def _ascii_runtime_roots() -> list[Path]:
+    roots: list[Path] = []
+    configured = os.environ.get("OMEGA_ASCII_RUNTIME_DIR")
+    if configured:
+        roots.append(Path(configured))
+    roots.extend(
+        [
+            Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "OmegaRuntime",
+            Path(r"C:\Windows\Temp") / "OmegaRuntime",
+        ]
+    )
+    return [root for root in roots if not _contains_non_ascii(str(root))]
+
+
+def _copy_tcl_tree_to_ascii_runtime(source_tcl_root: Path) -> Path | None:
+    if not source_tcl_root.exists():
+        return None
+
+    version_tag = f"python{sys.version_info.major}{sys.version_info.minor}_tcl"
+    for root in _ascii_runtime_roots():
+        target = root / version_tag
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            if not (target / "tcl8.6" / "init.tcl").exists() or not (target / "tk8.6" / "tk.tcl").exists():
+                shutil.copytree(source_tcl_root, target, dirs_exist_ok=True)
+            return target
+        except OSError:
+            continue
+    return None
+
+
+def configure_windows_tcl_tk() -> None:
+    """Help tkinter find Tcl/Tk when Python lives under a non-ASCII user path."""
+    if os.name != "nt":
+        return
+
+    python_dir = Path(sys.executable).resolve().parent
+    source_tcl_root = python_dir / "tcl"
+    tcl_root = source_tcl_root
+    if _contains_non_ascii(str(source_tcl_root)):
+        runtime_tcl_root = _copy_tcl_tree_to_ascii_runtime(source_tcl_root)
+        if runtime_tcl_root is not None:
+            tcl_root = runtime_tcl_root
+
+    candidates = {
+        "TCL_LIBRARY": ("tcl8.6", "init.tcl"),
+        "TK_LIBRARY": ("tk8.6", "tk.tcl"),
+    }
+    for variable, (directory_name, marker_name) in candidates.items():
+        configured = os.environ.get(variable)
+        if configured and (Path(configured) / marker_name).exists():
+            continue
+        candidate = tcl_root / directory_name
+        if (candidate / marker_name).exists():
+            os.environ[variable] = str(native_safe_path(candidate))
+
+
 def configure_windows_path_compat() -> Path | None:
     """Route caches and temporary files through an ASCII-only Windows path."""
     if os.name != "nt":
         return None
+
+    configure_windows_tcl_tk()
 
     temp_value = os.environ.get("TEMP") or os.environ.get("TMP")
     if temp_value:

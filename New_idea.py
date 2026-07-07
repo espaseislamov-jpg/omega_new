@@ -4385,7 +4385,15 @@ class ChromatogramApp:
                 omega_report = batch.get("omega", {}).get("omega3_trio", np.nan)
             value = omega_report if omega_report is not None else np.nan
             value_text = f"{value:.4f}" if np.isfinite(value) else ""
-            rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text))
+            confidence = batch.get("confidence") if isinstance(batch.get("confidence"), dict) else {}
+            confidence_score = confidence.get("score", np.nan)
+            confidence_label = confidence.get("label", "")
+            confidence_text = (
+                f"{int(round(confidence_score))}/100 {confidence_label}".strip()
+                if np.isfinite(confidence_score)
+                else ""
+            )
+            rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text, confidence_text))
         return rows
 
     def _populate_batch_tree_widget(self, tree: ttk.Treeview, process_all: bool = False):
@@ -4394,8 +4402,10 @@ class ChromatogramApp:
         selected_iid = str(self.current_batch_index) if self.loaded_batches else None
         for item_id in tree.get_children():
             tree.delete(item_id)
-        for index, sample_name, value_text in self.build_batch_results_rows(process_all=process_all):
-            tree.insert("", "end", iid=str(index), values=(sample_name, value_text))
+        show_confidence = "confidence" in set(tree["columns"])
+        for index, sample_name, value_text, confidence_text in self.build_batch_results_rows(process_all=process_all):
+            values = (sample_name, value_text, confidence_text) if show_confidence else (sample_name, value_text)
+            tree.insert("", "end", iid=str(index), values=values)
         if selected_iid is not None and tree.exists(selected_iid):
             self._batch_tree_syncing = True
             tree.selection_set(selected_iid)
@@ -4465,12 +4475,14 @@ class ChromatogramApp:
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
-        columns = ("sample_name", "omega_value")
+        columns = ("sample_name", "omega_value", "confidence")
         self.batch_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18, selectmode="extended")
         self.batch_results_tree.heading("sample_name", text="Номер образца")
         self.batch_results_tree.heading("omega_value", text="Значение")
+        self.batch_results_tree.heading("confidence", text="Уверенность")
         self.batch_results_tree.column("sample_name", width=300, anchor="w")
-        self.batch_results_tree.column("omega_value", width=140, anchor="center")
+        self.batch_results_tree.column("omega_value", width=120, anchor="center")
+        self.batch_results_tree.column("confidence", width=140, anchor="center")
         self.batch_results_tree.pack(side="left", fill="both", expand=True)
 
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.batch_results_tree.yview)
