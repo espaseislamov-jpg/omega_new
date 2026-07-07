@@ -114,6 +114,50 @@ def build_profile(
     }
 
 
+
+def blend_profiles(previous: dict | None, current: dict, alpha: float = 0.35) -> dict:
+    """Blend a previous persisted profile with a freshly measured batch profile.
+
+    `alpha` is the current-batch weight. The function only blends numeric summary
+    values that exist in both profiles; status counters and chi-square-like values
+    are kept from the current run because they describe current convergence.
+    """
+    if not previous:
+        return current
+    alpha = float(min(1.0, max(0.0, alpha)))
+    beta = 1.0 - alpha
+    blended = json.loads(json.dumps(current))
+    previous_targets = previous.get("targets", {}) if isinstance(previous, dict) else {}
+    for code, current_target in current.get("targets", {}).items():
+        previous_target = previous_targets.get(code)
+        if not isinstance(previous_target, dict):
+            continue
+        out_target = blended["targets"].get(code, {})
+        for section in ["rt", "width", "left_width", "right_width"]:
+            current_section = current_target.get(section, {})
+            previous_section = previous_target.get(section, {})
+            out_section = out_target.get(section, {})
+            for key in ["median", "mean", "std", "q25", "q75", "robust_scale"]:
+                c_val = current_section.get(key)
+                p_val = previous_section.get(key)
+                if c_val is None or p_val is None:
+                    continue
+                try:
+                    c_float = float(c_val)
+                    p_float = float(p_val)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(c_float) and np.isfinite(p_float):
+                    out_section[key] = float(beta * p_float + alpha * c_float)
+            out_section["n"] = int(current_section.get("n") or 0)
+            out_target[section] = out_section
+        blended["targets"][code] = out_target
+    blended["blending"] = {
+        "alpha_current": alpha,
+        "previous_schema_version": previous.get("schema_version") if isinstance(previous, dict) else None,
+    }
+    return blended
+
 def profile_to_frame(profile: dict) -> pd.DataFrame:
     rows = []
     for code, item in profile.get("targets", {}).items():

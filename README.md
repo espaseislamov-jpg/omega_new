@@ -25,9 +25,20 @@ conda run -n omega python New_idea.py
 ```
 
 
+
+## Repository layout
+
+- `omega_core/` — active modular processing engine.
+- `New_idea.py` — current GUI entry point.
+- `data/regression/` — committed historical regression CSV/XLSX pairs.
+- `data/archives/` — committed split archive parts used to recover the newest large batches.
+- `regression_outputs/` — committed reference reports from the latest regression runs.
+- `docs/` — investigation notes, diagnostics, and integration-plan documents.
+- `git_cloud_ready/` — older cloud-ready snapshot kept for reference.
+
 ## Extract uploaded archive data
 
-The uploaded `Desktop.part1.rar` / `Desktop.part2.rar` files are RAR5 split archives. Use `unar`; `unrar-free` may extract `02072026.CSV` only partially.
+The uploaded `data/archives/Desktop.part1.rar` / `data/archives/Desktop.part2.rar` files are RAR5 split archives. Use `unar`; `unrar-free` may extract `02072026.CSV` only partially.
 
 ```bash
 apt-get update && apt-get install -y unar

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OUT_DIR="${1:-extracted_desktop}"
-ARCHIVE="${2:-Desktop.part1.rar}"
+ARCHIVE="${2:-data/archives/Desktop.part1.rar}"
 
 if ! command -v unar >/dev/null 2>&1; then
   echo "The 'unar' extractor is required for these RAR5 split archives." >&2

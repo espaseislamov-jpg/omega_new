@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -11,7 +12,7 @@ if str(PROJECT_DIR) not in sys.path:
 
 import pandas as pd
 
-from omega_core.batch_profile import build_profile, profile_to_frame, save_profile
+from omega_core.batch_profile import blend_profiles, build_profile, profile_to_frame, save_profile
 
 
 def _markdown_table(df: pd.DataFrame) -> str:
@@ -36,12 +37,17 @@ def main() -> int:
     parser.add_argument("--dates", nargs="*", default=["02072026", "03072026"])
     parser.add_argument("--out-json", type=Path, default=Path("regression_outputs/batch_profiles/latest_rt_boundary_profile.json"))
     parser.add_argument("--out-md", type=Path, default=Path("regression_outputs/batch_profiles/latest_rt_boundary_profile.md"))
+    parser.add_argument("--previous-json", type=Path, default=None, help="Optional previous profile JSON to blend as warm-start.")
+    parser.add_argument("--blend-alpha", type=float, default=0.35, help="Current-batch weight when --previous-json is used.")
     args = parser.parse_args()
 
     peaks = pd.read_csv(args.peak_diagnostics)
     peaks["date"] = peaks["date"].astype(str).str.replace(r"\.0$", "", regex=True).str.zfill(8)
     selected = peaks[peaks["date"].isin(args.dates)].copy() if args.dates else peaks
     profile = build_profile(selected)
+    if args.previous_json is not None and args.previous_json.exists():
+        previous = json.loads(args.previous_json.read_text(encoding="utf-8"))
+        profile = blend_profiles(previous, profile, alpha=args.blend_alpha)
     save_profile(profile, args.out_json)
     profile_frame = profile_to_frame(profile)
 
@@ -51,6 +57,7 @@ def main() -> int:
         f"Source peak diagnostics: `{args.peak_diagnostics}`",
         f"Dates: `{', '.join(args.dates) if args.dates else 'ALL'}`",
         f"Rows: `{profile.get('global', {}).get('n_rows')}`; samples: `{profile.get('global', {}).get('n_samples')}`",
+        f"Blending: `{profile.get('blending', 'none')}`",
         "",
         "## Target profile summary",
         "",
