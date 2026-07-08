@@ -7,14 +7,7 @@ import numpy as np
 import pandas as pd
 
 from . import legacy_fit, metrics
-from .signal import (
-    CHEMSTATION_INITIAL_AREA_REJECT,
-    CHEMSTATION_INITIAL_THRESHOLD,
-    _extract_peak_geometry,
-    _get_x_column_name,
-    _merge_peak_records,
-    _robust_sigma,
-)
+from .signal import _extract_peak_geometry, _get_x_column_name, _merge_peak_records, _robust_sigma
 
 
 PEAK_SUPPORT_THRESHOLD_SIGMA = 0.80
@@ -146,8 +139,6 @@ def _collect_local_cluster_peak_geometries(
     x_col = _get_x_column_name(df)
     x = df[x_col].to_numpy(dtype=float)
     dy = df["dy"].to_numpy(dtype=float)
-    min_prominence = max(float(min_prominence), CHEMSTATION_INITIAL_THRESHOLD)
-    min_area = max(float(min_area), CHEMSTATION_INITIAL_AREA_REJECT)
     records = []
     for i in range(1, len(x) - 1):
         if x[i] < window_left or x[i] > window_right:
@@ -178,7 +169,6 @@ def _select_ordered_cluster_peaks(
     candidates_df: pd.DataFrame,
     target_apexes,
     max_distances,
-    min_apex_gaps=None,
 ):
     if candidates_df is None or candidates_df.empty:
         return None
@@ -195,11 +185,6 @@ def _select_ordered_cluster_peaks(
         distances = [abs(float(chosen.iloc[i]["apex_x"]) - target_apexes[i]) for i in range(len(target_apexes))]
         if any(distance > max_distances[i] for i, distance in enumerate(distances)):
             continue
-        if min_apex_gaps is not None:
-            required_gaps = [float(value) for value in min_apex_gaps]
-            observed_gaps = np.diff(chosen["apex_x"].to_numpy(dtype=float))
-            if any(float(gap) < required_gaps[min(idx, len(required_gaps) - 1)] for idx, gap in enumerate(observed_gaps)):
-                continue
         score = (
             float(sum(distances))
             - 1e-6 * float(chosen["prominence"].sum())
@@ -867,97 +852,6 @@ def refine_overlapped_c22_cluster_areas(
     return _recompute_matched_percent_area(out)
 
 
-
-def _collect_c20_order_candidates(peaks_df: pd.DataFrame, local_candidates: pd.DataFrame) -> pd.DataFrame:
-    frames = []
-    if peaks_df is not None and not peaks_df.empty:
-        peaks = peaks_df.copy()
-        peaks = peaks[(pd.to_numeric(peaks["apex_x"], errors="coerce") >= 8.34) & (pd.to_numeric(peaks["apex_x"], errors="coerce") <= 8.50)]
-        if not peaks.empty:
-            frames.append(peaks)
-    if local_candidates is not None and not local_candidates.empty:
-        frames.append(local_candidates.copy())
-    if not frames:
-        return pd.DataFrame()
-
-    candidates = pd.concat(frames, ignore_index=True, sort=False)
-    candidates["apex_x"] = pd.to_numeric(candidates["apex_x"], errors="coerce")
-    candidates["area"] = pd.to_numeric(candidates["area"], errors="coerce")
-    candidates["prominence"] = pd.to_numeric(candidates.get("prominence"), errors="coerce")
-    candidates = candidates.dropna(subset=["apex_x", "area"]).sort_values(["apex_x", "area"], ascending=[True, False])
-    if candidates.empty:
-        return candidates
-
-    deduped = []
-    for _, row in candidates.iterrows():
-        if deduped and abs(float(row["apex_x"]) - float(deduped[-1]["apex_x"])) <= 0.006:
-            if float(row["area"]) > float(deduped[-1]["area"]):
-                deduped[-1] = row
-            continue
-        deduped.append(row)
-    return pd.DataFrame(deduped).reset_index(drop=True)
-
-
-def _apply_c20_adjacency_order_rule(
-    peaks_df: pd.DataFrame,
-    matched_targets: pd.DataFrame,
-    local_candidates: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Force EPA (C20:5) to the resolved peak immediately after arachidonic.
-
-    Field/manual review shows EPA is an order-of-elution target in this method: it
-    is the feature adjacent to the right side of C20:4N6, while the later larger
-    C20:3N8 peak must not be promoted to EPA just because it is stronger.
-    """
-    out = matched_targets.copy()
-    peaks_out = peaks_df.copy() if peaks_df is not None else pd.DataFrame()
-    candidates = _collect_c20_order_candidates(peaks_out, local_candidates)
-    if len(candidates) < 2:
-        return peaks_out, out
-
-    ara_target = 8.381
-    ara_pos = int(np.argmin(np.abs(candidates["apex_x"].to_numpy(dtype=float) - ara_target)))
-    ara = candidates.iloc[ara_pos]
-    right = candidates[candidates["apex_x"] > float(ara["apex_x"]) + 0.003].sort_values("apex_x")
-    if right.empty:
-        return peaks_out, out
-
-    epa = right.iloc[0]
-    if float(epa["apex_x"]) - float(ara["apex_x"]) > 0.070:
-        return peaks_out, out
-
-    epa_row = out[out["code"] == "C20:5"]
-    if epa_row.empty:
-        return peaks_out, out
-    current_epa_rt = pd.to_numeric(epa_row["found_rt"], errors="coerce").iloc[0]
-    current_epa_area = pd.to_numeric(epa_row["area"], errors="coerce").iloc[0]
-    adjacent_epa_area = float(epa["area"])
-
-    if not (np.isfinite(current_epa_rt) and np.isfinite(current_epa_area) and adjacent_epa_area > 0):
-        return peaks_out, out
-    if float(current_epa_rt) <= float(epa["apex_x"]) + 0.020:
-        return peaks_out, out
-    if float(current_epa_area) < adjacent_epa_area * 2.5:
-        return peaks_out, out
-
-    assignments = [("C20:4N6", ara, "matched_c20_order_arachidonic"), ("C20:5", epa, "matched_c20_order_adjacent")]
-    later = right[right["apex_x"] > float(epa["apex_x"]) + 0.006].sort_values("apex_x")
-    if not later.empty:
-        assignments.append(("C20:3N8", later.iloc[0], "matched_c20_order_next"))
-
-    peaks_out = _attach_local_peak_records(peaks_out, pd.DataFrame([item[1] for item in assignments]))
-    peaks_lookup = peaks_out.copy()
-    for code, geom, status in assignments:
-        row_idx = out.index[out["code"] == code]
-        if not len(row_idx):
-            continue
-        row_idx_int = int(row_idx[0])
-        _assign_local_geometry_to_row(out, row_idx_int, geom, status)
-        peak_match = peaks_lookup[(peaks_lookup["apex_x"] - float(geom["apex_x"])).abs() <= 0.006]
-        if not peak_match.empty:
-            out.at[row_idx_int, "matched_peak_id"] = int(peak_match.sort_values("area", ascending=False).iloc[0]["peak_id"])
-    return peaks_out, out
-
 def refine_c18_c20_cluster_matches(
     df: pd.DataFrame,
     peaks_df: pd.DataFrame,
@@ -1005,7 +899,7 @@ def refine_c18_c20_cluster_matches(
     c20_choice = _select_ordered_cluster_peaks(
         c20_candidates,
         target_apexes=[8.381, 8.410, 8.467],
-        max_distances=[0.025, 0.025, 0.025],
+        max_distances=[0.025, 0.022, 0.025],
     )
     if c20_choice is not None:
         current_cluster = out[out["code"].isin(c20_codes)].copy()
@@ -1044,8 +938,6 @@ def refine_c18_c20_cluster_matches(
                 peak_match = peaks_lookup[(peaks_lookup["apex_x"] - float(geom["apex_x"])).abs() <= 0.006]
                 if not peak_match.empty:
                     out.at[int(row_idx[0]), "matched_peak_id"] = int(peak_match.sort_values("area", ascending=False).iloc[0]["peak_id"])
-
-    peaks_out, out = _apply_c20_adjacency_order_rule(peaks_out, out, c20_candidates)
 
     out = _recompute_matched_percent_area(out)
     return peaks_out, out
