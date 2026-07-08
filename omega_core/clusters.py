@@ -926,6 +926,20 @@ def _apply_c20_adjacency_order_rule(
     if float(epa["apex_x"]) - float(ara["apex_x"]) > 0.070:
         return peaks_out, out
 
+    epa_row = out[out["code"] == "C20:5"]
+    if epa_row.empty:
+        return peaks_out, out
+    current_epa_rt = pd.to_numeric(epa_row["found_rt"], errors="coerce").iloc[0]
+    current_epa_area = pd.to_numeric(epa_row["area"], errors="coerce").iloc[0]
+    adjacent_epa_area = float(epa["area"])
+
+    if not (np.isfinite(current_epa_rt) and np.isfinite(current_epa_area) and adjacent_epa_area > 0):
+        return peaks_out, out
+    if float(current_epa_rt) <= float(epa["apex_x"]) + 0.020:
+        return peaks_out, out
+    if float(current_epa_area) < adjacent_epa_area * 2.5:
+        return peaks_out, out
+
     assignments = [("C20:4N6", ara, "matched_c20_order_arachidonic"), ("C20:5", epa, "matched_c20_order_adjacent")]
     later = right[right["apex_x"] > float(epa["apex_x"]) + 0.006].sort_values("apex_x")
     if not later.empty:
