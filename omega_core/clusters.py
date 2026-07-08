@@ -40,10 +40,7 @@ FINAL_BOUNDARY_FALLBACK_MAX_CHANGED_PEAKS = 6
 FINAL_BOUNDARY_FALLBACK_MAX_AREA_RATIO = 1.080
 FINAL_BOUNDARY_FALLBACK_MAX_OMEGA_SHIFT = 0.100
 FINAL_BOUNDARY_FALLBACK_MAX_STRICT_SPREAD_INCREASE = 0.080
-# Enabled by default after field diagnostics showed large errors from peaks
-# absorbing neighboring shoulders when final boundary expansion drifted across
-# stable target-order midpoints. Set OMEGA_TARGET_RT_CORRIDOR_GUARD=0 to disable.
-ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "1").strip() == "1"
+ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "0").strip() == "1"
 TARGET_RT_CORRIDOR_GUARD_CODES = {"C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0", "C20:4N6", "C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"}
 TARGET_RT_CORRIDOR_MIN_WIDTH = 0.004
 JUDGE_DECISIONS_ATTR = "judge_decisions"
@@ -172,6 +169,7 @@ def _select_ordered_cluster_peaks(
     candidates_df: pd.DataFrame,
     target_apexes,
     max_distances,
+    min_apex_gaps=None,
 ):
     if candidates_df is None or candidates_df.empty:
         return None
@@ -188,6 +186,11 @@ def _select_ordered_cluster_peaks(
         distances = [abs(float(chosen.iloc[i]["apex_x"]) - target_apexes[i]) for i in range(len(target_apexes))]
         if any(distance > max_distances[i] for i, distance in enumerate(distances)):
             continue
+        if min_apex_gaps is not None:
+            required_gaps = [float(value) for value in min_apex_gaps]
+            observed_gaps = np.diff(chosen["apex_x"].to_numpy(dtype=float))
+            if any(float(gap) < required_gaps[min(idx, len(required_gaps) - 1)] for idx, gap in enumerate(observed_gaps)):
+                continue
         score = (
             float(sum(distances))
             - 1e-6 * float(chosen["prominence"].sum())
@@ -902,7 +905,8 @@ def refine_c18_c20_cluster_matches(
     c20_choice = _select_ordered_cluster_peaks(
         c20_candidates,
         target_apexes=[8.381, 8.410, 8.467],
-        max_distances=[0.025, 0.022, 0.025],
+        max_distances=[0.025, 0.018, 0.025],
+        min_apex_gaps=[0.016, 0.020],
     )
     if c20_choice is not None:
         current_cluster = out[out["code"].isin(c20_codes)].copy()
