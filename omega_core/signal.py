@@ -62,6 +62,14 @@ PYOPENMS_SN_WIN_LEN = 50.0
 PYOPENMS_MIN_PROMINENCE_SIGMA = 0.75
 PYOPENMS_MIN_PROMINENCE_FLOOR = 20.0
 
+# ChemStation integrator defaults observed in the field setup.  Keep these as
+# lower bounds for Omega's detector so small shoulders below the operator's
+# threshold are not promoted into standalone C20/C22 target peaks.
+CHEMSTATION_INITIAL_AREA_REJECT = 1.0
+CHEMSTATION_INITIAL_PEAK_WIDTH = 0.016
+CHEMSTATION_SHOULDER_DETECTION = False
+CHEMSTATION_INITIAL_THRESHOLD = 12.9
+
 _PYOPENMS_PEAK_PICKER = None
 _PYOPENMS_IMPORT_ATTEMPTED = False
 oms = None
@@ -188,6 +196,8 @@ def _find_targeted_peak_candidate(
     x_col = _get_x_column_name(df)
     x = df[x_col].to_numpy(dtype=float)
     dy = df["dy"].to_numpy(dtype=float)
+    min_prominence = max(float(min_prominence), CHEMSTATION_INITIAL_THRESHOLD)
+    min_area = max(float(min_area), CHEMSTATION_INITIAL_AREA_REJECT)
 
     if len(x) < 3:
         return None
@@ -204,6 +214,8 @@ def _find_targeted_peak_candidate(
     for apex_idx in zero_crossings:
         geom = _extract_peak_geometry(df, apex_idx)
         if geom is None:
+            continue
+        if not CHEMSTATION_SHOULDER_DETECTION and geom["prominence"] < CHEMSTATION_INITIAL_THRESHOLD:
             continue
         if geom["prominence"] < min_prominence or geom["area"] < min_area:
             continue
@@ -522,9 +534,13 @@ def detect_peak_candidates(
     noise = max(_robust_sigma(y_corrected), 1e-9)
 
     height_floor = max(np.median(y_smooth) + height_sigma * noise, np.quantile(y_smooth, 0.60))
-    prominence_floor = max(prominence_sigma * noise, np.quantile(y_smooth_positive, 0.75) * 0.05)
+    prominence_floor = max(
+        prominence_sigma * noise,
+        np.quantile(y_smooth_positive, 0.75) * 0.05,
+        CHEMSTATION_INITIAL_THRESHOLD,
+    )
     min_distance = max(1, int(round(0.03 / max(dx, 1e-9))))
-    min_width = max(1, int(round(0.009 / max(dx, 1e-9))))
+    min_width = max(1, int(round(CHEMSTATION_INITIAL_PEAK_WIDTH / max(dx, 1e-9))))
 
     peaks, props = find_peaks(
         y_smooth,
@@ -582,6 +598,8 @@ def detect_peak_candidates(
         x_seg = x[start_idx:end_idx + 1]
         y_seg = np.clip(y_corrected[start_idx:end_idx + 1], 0.0, None)
         area = float(np.trapezoid(y_seg, x_seg))
+        if area < CHEMSTATION_INITIAL_AREA_REJECT:
+            continue
         records.append({
             "peak_id": order,
             "start_idx": start_idx,
@@ -595,6 +613,9 @@ def detect_peak_candidates(
             "width_points": float(props["widths"][order - 1]),
             "area": area,
         })
+
+    if not records:
+        return pd.DataFrame(columns=["peak_id", "start_x", "apex_x", "end_x", "area", "percent_area"])
 
     peaks_df = pd.DataFrame(records).sort_values("apex_x").reset_index(drop=True)
     if peaks_df.empty:
