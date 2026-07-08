@@ -7,7 +7,14 @@ import numpy as np
 import pandas as pd
 
 from . import legacy_fit, metrics
-from .signal import _extract_peak_geometry, _get_x_column_name, _merge_peak_records, _robust_sigma
+from .signal import (
+    CHEMSTATION_INITIAL_AREA_REJECT,
+    CHEMSTATION_INITIAL_THRESHOLD,
+    _extract_peak_geometry,
+    _get_x_column_name,
+    _merge_peak_records,
+    _robust_sigma,
+)
 
 
 PEAK_SUPPORT_THRESHOLD_SIGMA = 0.80
@@ -139,6 +146,8 @@ def _collect_local_cluster_peak_geometries(
     x_col = _get_x_column_name(df)
     x = df[x_col].to_numpy(dtype=float)
     dy = df["dy"].to_numpy(dtype=float)
+    min_prominence = max(float(min_prominence), CHEMSTATION_INITIAL_THRESHOLD)
+    min_area = max(float(min_area), CHEMSTATION_INITIAL_AREA_REJECT)
     records = []
     for i in range(1, len(x) - 1):
         if x[i] < window_left or x[i] > window_right:
@@ -169,6 +178,7 @@ def _select_ordered_cluster_peaks(
     candidates_df: pd.DataFrame,
     target_apexes,
     max_distances,
+    min_apex_gaps=None,
 ):
     if candidates_df is None or candidates_df.empty:
         return None
@@ -185,6 +195,11 @@ def _select_ordered_cluster_peaks(
         distances = [abs(float(chosen.iloc[i]["apex_x"]) - target_apexes[i]) for i in range(len(target_apexes))]
         if any(distance > max_distances[i] for i, distance in enumerate(distances)):
             continue
+        if min_apex_gaps is not None:
+            required_gaps = [float(value) for value in min_apex_gaps]
+            observed_gaps = np.diff(chosen["apex_x"].to_numpy(dtype=float))
+            if any(float(gap) < required_gaps[min(idx, len(required_gaps) - 1)] for idx, gap in enumerate(observed_gaps)):
+                continue
         score = (
             float(sum(distances))
             - 1e-6 * float(chosen["prominence"].sum())
@@ -899,7 +914,8 @@ def refine_c18_c20_cluster_matches(
     c20_choice = _select_ordered_cluster_peaks(
         c20_candidates,
         target_apexes=[8.381, 8.410, 8.467],
-        max_distances=[0.025, 0.022, 0.025],
+        max_distances=[0.025, 0.018, 0.025],
+        min_apex_gaps=[0.016, 0.020],
     )
     if c20_choice is not None:
         current_cluster = out[out["code"].isin(c20_codes)].copy()
