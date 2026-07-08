@@ -40,7 +40,10 @@ FINAL_BOUNDARY_FALLBACK_MAX_CHANGED_PEAKS = 6
 FINAL_BOUNDARY_FALLBACK_MAX_AREA_RATIO = 1.080
 FINAL_BOUNDARY_FALLBACK_MAX_OMEGA_SHIFT = 0.100
 FINAL_BOUNDARY_FALLBACK_MAX_STRICT_SPREAD_INCREASE = 0.080
-ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "0").strip() == "1"
+# Enabled by default after field diagnostics showed large errors from peaks
+# absorbing neighboring shoulders when final boundary expansion drifted across
+# stable target-order midpoints. Set OMEGA_TARGET_RT_CORRIDOR_GUARD=0 to disable.
+ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "1").strip() == "1"
 TARGET_RT_CORRIDOR_GUARD_CODES = {"C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0", "C20:4N6", "C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"}
 TARGET_RT_CORRIDOR_MIN_WIDTH = 0.004
 JUDGE_DECISIONS_ATTR = "judge_decisions"
