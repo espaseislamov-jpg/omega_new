@@ -7,7 +7,14 @@ import numpy as np
 import pandas as pd
 
 from . import legacy_fit, metrics
-from .signal import _extract_peak_geometry, _get_x_column_name, _merge_peak_records, _robust_sigma
+from .signal import (
+    CHEMSTATION_INITIAL_AREA_REJECT,
+    CHEMSTATION_INITIAL_THRESHOLD,
+    _extract_peak_geometry,
+    _get_x_column_name,
+    _merge_peak_records,
+    _robust_sigma,
+)
 
 
 PEAK_SUPPORT_THRESHOLD_SIGMA = 0.80
@@ -139,6 +146,8 @@ def _collect_local_cluster_peak_geometries(
     x_col = _get_x_column_name(df)
     x = df[x_col].to_numpy(dtype=float)
     dy = df["dy"].to_numpy(dtype=float)
+    min_prominence = max(float(min_prominence), CHEMSTATION_INITIAL_THRESHOLD)
+    min_area = max(float(min_area), CHEMSTATION_INITIAL_AREA_REJECT)
     records = []
     for i in range(1, len(x) - 1):
         if x[i] < window_left or x[i] > window_right:
