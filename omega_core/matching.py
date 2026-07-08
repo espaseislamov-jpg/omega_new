@@ -306,10 +306,9 @@ def match_targets_to_peaks(targets_df: pd.DataFrame, peaks_df: pd.DataFrame) -> 
         peaks_df,
         cluster_codes=["C20:4N6", "C20:5", "C20:3N8"],
         target_apexes=[8.381, 8.410, 8.467],
-        max_distance=[0.025, 0.018, 0.025],
+        max_distance=0.025,
         status="matched_c20_rule",
         rt_shift=shift,
-        min_apex_gaps=[0.016, 0.020],
     )
     out = apply_c22_cluster_override(out, peaks_df, rt_shift=shift)
     return out, shift
