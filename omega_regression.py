@@ -215,6 +215,8 @@ def _extract_result_features(result: dict) -> dict:
                 features[f"{slug}_asymmetry"] = max(found_rt - start_x, end_x - found_rt) / max(min(found_rt - start_x, end_x - found_rt), 1e-9)
             else:
                 features[f"{slug}_asymmetry"] = np.nan
+            for profile_col in ["manual_table_rt", "rt_profile_anchor_coefficient", "rt_profile_coefficient", "rt_profile_expected_rt", "rt_profile_delta_to_anchor"]:
+                features[f"{slug}_{profile_col}"] = _safe_float(row.get(profile_col)) if row is not None else np.nan
             features[f"{slug}_status"] = _target_status(matched, code)
     return features
 
@@ -786,6 +788,11 @@ def build_diagnostic_tables(results: pd.DataFrame) -> tuple[pd.DataFrame, pd.Dat
                 "corrected_target_rt": row.get(f"{slug}_corrected_target_rt"),
                 "found_rt": row.get(f"{slug}_found_rt"),
                 "rt_error": row.get(f"{slug}_rt_error"),
+                "manual_table_rt": row.get(f"{slug}_manual_table_rt"),
+                "rt_profile_anchor_coefficient": row.get(f"{slug}_rt_profile_anchor_coefficient"),
+                "rt_profile_coefficient": row.get(f"{slug}_rt_profile_coefficient"),
+                "rt_profile_expected_rt": row.get(f"{slug}_rt_profile_expected_rt"),
+                "rt_profile_delta_to_anchor": row.get(f"{slug}_rt_profile_delta_to_anchor"),
                 "area": row.get(f"{slug}_area"),
                 "width": row.get(f"{slug}_width"),
                 "left_width": row.get(f"{slug}_left_width"),
