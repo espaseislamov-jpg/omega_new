@@ -107,9 +107,10 @@ def _apply_target_cluster_override(
     peaks: pd.DataFrame,
     cluster_codes,
     target_apexes,
-    max_distance: float,
+    max_distance: float | list[float],
     status: str,
     rt_shift: float,
+    min_apex_gaps=None,
 ) -> pd.DataFrame:
     out = matched_targets.copy()
     if out.empty or peaks is None or peaks.empty:
@@ -118,12 +119,17 @@ def _apply_target_cluster_override(
     peaks_apex = peaks["apex_x"].to_numpy(dtype=float)
     peaks_prominence = peaks["prominence"].to_numpy(dtype=float)
     peaks_area = peaks["area"].to_numpy(dtype=float)
+    if np.isscalar(max_distance):
+        max_distances = [float(max_distance)] * len(cluster_codes)
+    else:
+        max_distances = [float(value) for value in max_distance]
+
     used_mask = np.zeros(len(peaks), dtype=bool)
     chosen = {}
-    for code, target_apex in zip(cluster_codes, target_apexes):
+    for code, target_apex, target_max_distance in zip(cluster_codes, target_apexes, max_distances):
         adjusted_target = float(target_apex + rt_shift)
         distances = np.abs(peaks_apex - adjusted_target)
-        candidate_positions = np.flatnonzero((~used_mask) & (distances <= max_distance))
+        candidate_positions = np.flatnonzero((~used_mask) & (distances <= target_max_distance))
         if candidate_positions.size == 0:
             continue
         best_pos = _select_best_peak_position(candidate_positions, distances, peaks_prominence, peaks_area)
@@ -133,6 +139,15 @@ def _apply_target_cluster_override(
 
     if not chosen:
         return out
+
+    if min_apex_gaps is not None:
+        ordered_apexes = [float(chosen[code]["apex_x"]) for code in cluster_codes if code in chosen]
+        if len(ordered_apexes) >= 2:
+            required_gaps = [float(value) for value in min_apex_gaps]
+            for gap_idx, observed_gap in enumerate(np.diff(ordered_apexes)):
+                required_gap = required_gaps[min(gap_idx, len(required_gaps) - 1)]
+                if float(observed_gap) < required_gap:
+                    return out
 
     selected_peak_ids = {int(peak["peak_id"]) for peak in chosen.values()}
     conflict_mask = out["matched_peak_id"].isin(selected_peak_ids) & ~out["code"].isin(cluster_codes)
@@ -179,6 +194,10 @@ def apply_c22_cluster_override(
         used_mask[best_pos] = True
 
     if len(chosen) < 2:
+        return out
+
+    ordered_apexes = [float(chosen[code]["apex_x"]) for code in cluster_codes if code in chosen]
+    if any(float(gap) < 0.014 for gap in np.diff(ordered_apexes)):
         return out
 
     for code in cluster_codes:
