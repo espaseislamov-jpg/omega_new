@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import chromatopy_adapter, clusters, io, matching, metrics, signal
+from . import chromatopy_adapter, clusters, io, matching, metrics, rt_profile, signal
 
 
 def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
@@ -14,6 +14,7 @@ def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFra
     matched_targets, rt_shift = matching.match_targets_to_peaks(reference_targets, peaks)
     matched_targets = chromatopy_adapter.apply_chromatopy_target_integration(processed, matched_targets)
     peaks, matched_targets = clusters.refine_cluster_matches(processed, peaks, matched_targets)
+    matched_targets = rt_profile.annotate_rt_profile(matched_targets)
     omega = metrics.compute_omega(matched_targets)
     judge_decisions = matched_targets.attrs.get(clusters.JUDGE_DECISIONS_ATTR, [])
     return {
