@@ -13,17 +13,18 @@ from scipy.signal import find_peaks
 from .signal import _get_x_column_name, _robust_sigma
 
 
-ENABLE_CHROMATOPY_INTEGRATION = os.environ.get("OMEGA_USE_CHROMATOPY_INTEGRATION", "0").strip() == "1"
+ENABLE_CHROMATOPY_INTEGRATION = os.environ.get("OMEGA_USE_CHROMATOPY_INTEGRATION", "1").strip() == "1"
 CHROMATOPY_FIT_MODE = os.environ.get("OMEGA_CHROMATOPY_FIT_MODE", "single").strip().lower()
 CHROMATOPY_GAUS_ITERATIONS = int(os.environ.get("OMEGA_CHROMATOPY_GAUS_ITERATIONS", "800"))
 CHROMATOPY_PK_SNS = float(os.environ.get("OMEGA_CHROMATOPY_PK_SNS", "0.001"))
 CHROMATOPY_SMOOTHING_WINDOW = int(os.environ.get("OMEGA_CHROMATOPY_SMOOTHING_WINDOW", "7"))
 CHROMATOPY_SMOOTHING_POLYORDER = int(os.environ.get("OMEGA_CHROMATOPY_SMOOTHING_POLYORDER", "3"))
 CHROMATOPY_MATCH_TOLERANCE = float(os.environ.get("OMEGA_CHROMATOPY_MATCH_TOLERANCE", "0.055"))
-CHROMATOPY_MAX_WIDTH = float(os.environ.get("OMEGA_CHROMATOPY_MAX_WIDTH", "0.180"))
-CHROMATOPY_MIN_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MIN_AREA_RATIO", "0.45"))
-CHROMATOPY_MAX_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MAX_AREA_RATIO", "2.50"))
-CHROMATOPY_TARGET_CODES_TEXT = os.environ.get("OMEGA_CHROMATOPY_TARGET_CODES", "C16:1N7,C18:3N6,C20:5,C22:6")
+CHROMATOPY_MAX_WIDTH = float(os.environ.get("OMEGA_CHROMATOPY_MAX_WIDTH", "0.120"))
+CHROMATOPY_MIN_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MIN_AREA_RATIO", "0.25"))
+CHROMATOPY_MAX_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MAX_AREA_RATIO", "2.00"))
+CHROMATOPY_TARGET_CODES_TEXT = os.environ.get("OMEGA_CHROMATOPY_TARGET_CODES", "C20:5,C22:6,C22:5,C22:4")
+CHROMATOPY_USE_GAUSSIAN_FIT = os.environ.get("OMEGA_CHROMATOPY_USE_GAUSSIAN_FIT", "0").strip() == "1"
 CHROMATOPY_TARGET_CODES = {
     item.strip().upper()
     for item in CHROMATOPY_TARGET_CODES_TEXT.split(",")
@@ -61,7 +62,7 @@ def _load_chromatopy_functions():
         return _CHROMATOPY_FUNCTIONS
 
     try:
-        from chromatopy.FID.FID_Integration_functions import fit_gaussians, smoother
+        from chromatopy.FID.FID_Integration_functions import calculate_boundaries, fit_gaussians, smoother
     except Exception:
         module_path = _chromatopy_fid_module_path()
         spec = importlib.util.spec_from_file_location("_omega_chromatopy_fid_functions", module_path)
@@ -69,16 +70,20 @@ def _load_chromatopy_functions():
             raise ImportError(f"Cannot load ChromatoPy FID functions from {module_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+        calculate_boundaries = module.calculate_boundaries
         fit_gaussians = module.fit_gaussians
         smoother = module.smoother
 
-    _CHROMATOPY_FUNCTIONS = (fit_gaussians, smoother)
+    _CHROMATOPY_FUNCTIONS = (calculate_boundaries, fit_gaussians, smoother)
     return _CHROMATOPY_FUNCTIONS
 
 
-def _build_chromatopy_peak_index(x: np.ndarray, y: np.ndarray, smoother_func) -> tuple[np.ndarray, np.ndarray]:
+def _build_chromatopy_peak_index(x: np.ndarray, y: np.ndarray, smoother_func=None) -> tuple[np.ndarray, np.ndarray]:
     smoothing = [CHROMATOPY_SMOOTHING_WINDOW, CHROMATOPY_SMOOTHING_POLYORDER]
-    y_smooth = np.asarray(smoother_func(y, smoothing[0], smoothing[1]), dtype=float)
+    if smoother_func is None:
+        y_smooth = np.asarray(y, dtype=float)
+    else:
+        y_smooth = np.asarray(smoother_func(y, smoothing[0], smoothing[1]), dtype=float)
     y_smooth = np.clip(y_smooth, 0.0, None)
     noise = max(_robust_sigma(y), 1.0)
     prominence_floor = max(noise * 1.8, float(np.quantile(y_smooth, 0.75)) * 0.025, 5.0)
@@ -120,7 +125,7 @@ def _fit_one_peak(
     peak_indices: np.ndarray,
     peak_idx: int,
 ) -> dict | None:
-    fit_gaussians, _ = _load_chromatopy_functions()
+    _, fit_gaussians, _ = _load_chromatopy_functions()
     x_series = pd.Series(x)
     y_series = pd.Series(y_smooth)
     neighbors = _choose_neighbor_peaks(x, peak_indices, peak_idx, max_neighbors=3)
@@ -160,6 +165,59 @@ def _fit_one_peak(
     }
 
 
+
+def _numeric_chromatopy_area(
+    x: np.ndarray,
+    y: np.ndarray,
+    peak_idx: int,
+    left_limit_x: float,
+    right_limit_x: float,
+    calculate_boundaries_func=None,
+) -> dict | None:
+    left_limit_idx = int(np.searchsorted(x, float(left_limit_x), side="left"))
+    right_limit_idx = int(np.searchsorted(x, float(right_limit_x), side="right") - 1)
+    left_limit_idx = max(0, min(left_limit_idx, int(peak_idx)))
+    right_limit_idx = min(len(x) - 1, max(right_limit_idx, int(peak_idx)))
+    if right_limit_idx <= left_limit_idx:
+        return None
+
+    x_local = x[left_limit_idx:right_limit_idx + 1]
+    y_local = np.clip(y[left_limit_idx:right_limit_idx + 1], 0.0, None)
+    local_peak_idx = int(peak_idx) - left_limit_idx
+    try:
+        if calculate_boundaries_func is None:
+            raise RuntimeError("chromatopy boundary function disabled")
+        local_left, local_right = calculate_boundaries_func(
+            pd.Series(x_local),
+            pd.Series(y_local),
+            local_peak_idx,
+            [CHROMATOPY_SMOOTHING_WINDOW, CHROMATOPY_SMOOTHING_POLYORDER],
+            CHROMATOPY_PK_SNS,
+        )
+        start_idx = left_limit_idx + int(local_left)
+        end_idx = left_limit_idx + int(local_right)
+    except Exception:
+        start_idx = left_limit_idx + int(np.argmin(y_local[:local_peak_idx + 1]))
+        end_idx = left_limit_idx + int(local_peak_idx + np.argmin(y_local[local_peak_idx:]))
+
+    start_idx = max(left_limit_idx, min(start_idx, int(peak_idx)))
+    end_idx = min(right_limit_idx, max(end_idx, int(peak_idx)))
+    if end_idx <= start_idx or start_idx >= int(peak_idx) or end_idx <= int(peak_idx):
+        return None
+    width = float(x[end_idx] - x[start_idx])
+    if width <= 0 or width > CHROMATOPY_MAX_WIDTH:
+        return None
+    area = float(np.trapezoid(np.clip(y[start_idx:end_idx + 1], 0.0, None), x[start_idx:end_idx + 1]))
+    if not np.isfinite(area) or area <= 0:
+        return None
+    return {
+        "found_rt": float(x[peak_idx]),
+        "area": area,
+        "integration_start_x": float(x[start_idx]),
+        "integration_end_x": float(x[end_idx]),
+        "model": "numeric",
+    }
+
 def apply_chromatopy_target_integration(
     processed: pd.DataFrame,
     matched_targets: pd.DataFrame,
@@ -168,10 +226,14 @@ def apply_chromatopy_target_integration(
     if not ENABLE_CHROMATOPY_INTEGRATION or processed is None or processed.empty or out is None or out.empty:
         return out
 
-    try:
-        _, smoother_func = _load_chromatopy_functions()
-    except Exception:
-        return out
+    calculate_boundaries_func = None
+    smoother_func = None
+    if CHROMATOPY_USE_GAUSSIAN_FIT:
+        try:
+            calculate_boundaries_func, _, smoother_func = _load_chromatopy_functions()
+        except Exception:
+            calculate_boundaries_func = None
+            smoother_func = None
 
     x_col = _get_x_column_name(processed)
     x = processed[x_col].to_numpy(dtype=float)
@@ -179,7 +241,8 @@ def apply_chromatopy_target_integration(
     if len(x) < 16 or not np.any(y > 0):
         return out
 
-    peak_indices, y_smooth = _build_chromatopy_peak_index(x, y, smoother_func)
+    peak_signal = np.clip(processed.get("y_smooth", processed["y_corrected"]).to_numpy(dtype=float), 0.0, None)
+    peak_indices, y_smooth = _build_chromatopy_peak_index(x, peak_signal, smoother_func)
     if peak_indices.size == 0:
         return out
 
@@ -197,7 +260,15 @@ def apply_chromatopy_target_integration(
         if peak_idx is None:
             continue
 
-        fit = _fit_one_peak(x, y_smooth, peak_indices, peak_idx)
+        left_limit = pd.to_numeric(pd.Series([row.get("integration_start_x")]), errors="coerce").iloc[0]
+        right_limit = pd.to_numeric(pd.Series([row.get("integration_end_x")]), errors="coerce").iloc[0]
+        if not (np.isfinite(left_limit) and np.isfinite(right_limit) and right_limit > left_limit):
+            left_limit = float(target_rt) - 0.055
+            right_limit = float(target_rt) + 0.055
+
+        fit = _numeric_chromatopy_area(x, y, peak_idx, float(left_limit), float(right_limit), calculate_boundaries_func)
+        if fit is None and CHROMATOPY_USE_GAUSSIAN_FIT:
+            fit = _fit_one_peak(x, y_smooth, peak_indices, peak_idx)
         if fit is None:
             continue
 

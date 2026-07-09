@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from . import legacy_fit, metrics
+from . import legacy_fit, metrics, rt_profile
 from .signal import _extract_peak_geometry, _get_x_column_name, _merge_peak_records, _robust_sigma
 
 
@@ -1432,7 +1432,15 @@ def enforce_target_rt_corridors(
     work = out.copy()
     for column in ["found_rt", "corrected_target_rt", "integration_start_x", "integration_end_x", "area"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["_corridor_center"] = work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"])
+    anchor_coefficient = rt_profile.estimate_anchor_coefficient(work)
+    manual_centers = work["code"].map(lambda code: rt_profile.MANUAL_TABLE_RTS.get(str(code)))
+    manual_centers = pd.to_numeric(manual_centers, errors="coerce")
+    if np.isfinite(anchor_coefficient) and anchor_coefficient > 0:
+        manual_centers = manual_centers / float(anchor_coefficient)
+    work["_corridor_center"] = manual_centers.where(
+        manual_centers.notna(),
+        work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"]),
+    )
     work = work.dropna(subset=["_corridor_center", "found_rt", "integration_start_x", "integration_end_x"]).sort_values("_corridor_center")
     if len(work) < 2:
         return out
