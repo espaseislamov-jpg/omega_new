@@ -25,6 +25,7 @@ CHROMATOPY_MIN_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MIN_AREA_RATI
 CHROMATOPY_MAX_AREA_RATIO = float(os.environ.get("OMEGA_CHROMATOPY_MAX_AREA_RATIO", "2.00"))
 CHROMATOPY_TARGET_CODES_TEXT = os.environ.get("OMEGA_CHROMATOPY_TARGET_CODES", "C20:5,C22:6,C22:5,C22:4")
 CHROMATOPY_USE_GAUSSIAN_FIT = os.environ.get("OMEGA_CHROMATOPY_USE_GAUSSIAN_FIT", "0").strip() == "1"
+CHROMATOPY_BOUNDARY_SEARCH_PADDING = float(os.environ.get("OMEGA_CHROMATOPY_BOUNDARY_SEARCH_PADDING", "0.030"))
 CHROMATOPY_TARGET_CODES = {
     item.strip().upper()
     for item in CHROMATOPY_TARGET_CODES_TEXT.split(",")
@@ -265,6 +266,12 @@ def apply_chromatopy_target_integration(
         if not (np.isfinite(left_limit) and np.isfinite(right_limit) and right_limit > left_limit):
             left_limit = float(target_rt) - 0.055
             right_limit = float(target_rt) + 0.055
+        else:
+            # The incoming interval is only an initial estimate.  Searching only
+            # inside it makes an under-integrated boundary impossible to repair:
+            # the local minimum is then necessarily one of the clipped endpoints.
+            left_limit = min(float(left_limit), float(target_rt) - CHROMATOPY_BOUNDARY_SEARCH_PADDING)
+            right_limit = max(float(right_limit), float(target_rt) + CHROMATOPY_BOUNDARY_SEARCH_PADDING)
 
         fit = _numeric_chromatopy_area(x, y, peak_idx, float(left_limit), float(right_limit), calculate_boundaries_func)
         if fit is None and CHROMATOPY_USE_GAUSSIAN_FIT:

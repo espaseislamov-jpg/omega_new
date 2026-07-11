@@ -7,8 +7,6 @@ import numpy as np
 import pandas as pd
 
 from . import legacy_fit, metrics, rt_profile
-from .signal import _extract_peak_geometry, _get_x_column_name, _merge_peak_records, _robust_sigma
-from . import legacy_fit, metrics
 from .signal import (
     CHEMSTATION_INITIAL_AREA_REJECT,
     CHEMSTATION_INITIAL_THRESHOLD,
