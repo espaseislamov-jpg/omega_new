@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from . import legacy_fit, metrics
+from . import legacy_fit, metrics, rt_profile
 from .signal import (
     CHEMSTATION_INITIAL_AREA_REJECT,
     CHEMSTATION_INITIAL_THRESHOLD,
@@ -1448,7 +1448,15 @@ def enforce_target_rt_corridors(
     work = out.copy()
     for column in ["found_rt", "corrected_target_rt", "integration_start_x", "integration_end_x", "area"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
-    work["_corridor_center"] = work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"])
+    anchor_coefficient = rt_profile.estimate_anchor_coefficient(work)
+    manual_centers = work["code"].map(lambda code: rt_profile.MANUAL_TABLE_RTS.get(str(code)))
+    manual_centers = pd.to_numeric(manual_centers, errors="coerce")
+    if np.isfinite(anchor_coefficient) and anchor_coefficient > 0:
+        manual_centers = manual_centers / float(anchor_coefficient)
+    work["_corridor_center"] = manual_centers.where(
+        manual_centers.notna(),
+        work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"]),
+    )
     work = work.dropna(subset=["_corridor_center", "found_rt", "integration_start_x", "integration_end_x"]).sort_values("_corridor_center")
     if len(work) < 2:
         return out
@@ -1517,6 +1525,79 @@ def enforce_target_rt_corridors(
     out = _recompute_matched_percent_area(out)
     return _with_judge_decisions(out, decisions)
 
+
+DPA_OVERINTEGRATION_RATIO_MIN = 1.35
+DPA_TIGHT_WIDTH_MAX = 0.028
+DPA_TIGHT_HALF_WINDOW = 0.014
+
+
+def tighten_dpa_overintegration_by_local_bounds(
+    df: pd.DataFrame,
+    matched_targets: pd.DataFrame,
+) -> pd.DataFrame:
+    """Trim over-wide C22:5/DPA integrations when they dominate C22:4.
+
+    The recurrent field failure is a DPA interval absorbing too much neighbor
+    shoulder.  When DPA is much larger than C22:4 and its current interval is
+    wider than a normal resolved DPA peak, re-bound it around the apex by local
+    minima in a narrow window.  This changes integration boundaries directly;
+    metrics-level debit remains only a secondary safety net.
+    """
+    out = matched_targets.copy()
+    if df is None or df.empty or out is None or out.empty:
+        return out
+    required = {"C22:5", "C22:4"}
+    if not required.issubset(set(out.get("code", []))):
+        return out
+
+    dpa_idx_list = out.index[out["code"] == "C22:5"].tolist()
+    c224_idx_list = out.index[out["code"] == "C22:4"].tolist()
+    if not dpa_idx_list or not c224_idx_list:
+        return out
+    dpa_idx = int(dpa_idx_list[0])
+    c224_idx = int(c224_idx_list[0])
+    dpa_area = pd.to_numeric(pd.Series([out.at[dpa_idx, "area"]]), errors="coerce").iloc[0]
+    c224_area = pd.to_numeric(pd.Series([out.at[c224_idx, "area"]]), errors="coerce").iloc[0]
+    found_rt = pd.to_numeric(pd.Series([out.at[dpa_idx, "found_rt"]]), errors="coerce").iloc[0]
+    start_x = pd.to_numeric(pd.Series([out.at[dpa_idx, "integration_start_x"]]), errors="coerce").iloc[0]
+    end_x = pd.to_numeric(pd.Series([out.at[dpa_idx, "integration_end_x"]]), errors="coerce").iloc[0]
+    if not all(np.isfinite(v) for v in [dpa_area, c224_area, found_rt, start_x, end_x]):
+        return out
+    if c224_area <= 0 or dpa_area / c224_area <= DPA_OVERINTEGRATION_RATIO_MIN:
+        return out
+    if end_x - start_x <= DPA_TIGHT_WIDTH_MAX:
+        return out
+
+    x_col = _get_x_column_name(df)
+    x = df[x_col].to_numpy(dtype=float)
+    y = np.clip(df["y_corrected"].to_numpy(dtype=float), 0.0, None)
+    if len(x) < 4:
+        return out
+    apex_idx = int(np.argmin(np.abs(x - float(found_rt))))
+    left_limit = max(float(start_x), float(found_rt) - DPA_TIGHT_HALF_WINDOW)
+    right_limit = min(float(end_x), float(found_rt) + DPA_TIGHT_HALF_WINDOW)
+    left_idx = int(np.searchsorted(x, left_limit, side="left"))
+    right_idx = int(np.searchsorted(x, right_limit, side="right") - 1)
+    left_idx = max(0, min(left_idx, apex_idx))
+    right_idx = min(len(x) - 1, max(right_idx, apex_idx))
+    if right_idx <= left_idx or apex_idx <= left_idx or apex_idx >= right_idx:
+        return out
+    new_start_idx = int(left_idx + np.argmin(y[left_idx:apex_idx + 1]))
+    new_end_idx = int(apex_idx + np.argmin(y[apex_idx:right_idx + 1]))
+    if new_end_idx <= new_start_idx or not (new_start_idx < apex_idx < new_end_idx):
+        return out
+    new_width = float(x[new_end_idx] - x[new_start_idx])
+    if new_width < TARGET_RT_CORRIDOR_MIN_WIDTH or new_width >= float(end_x - start_x):
+        return out
+    new_area = float(np.trapezoid(y[new_start_idx:new_end_idx + 1], x[new_start_idx:new_end_idx + 1]))
+    if not np.isfinite(new_area) or new_area <= 0 or new_area >= dpa_area:
+        return out
+    out.at[dpa_idx, "area"] = new_area
+    out.at[dpa_idx, "integration_start_x"] = float(x[new_start_idx])
+    out.at[dpa_idx, "integration_end_x"] = float(x[new_end_idx])
+    out.at[dpa_idx, "status"] = _append_status_suffix(out.at[dpa_idx, "status"], "dpatight")
+    return _recompute_matched_percent_area(out)
+
 def refine_cluster_matches(
     processed: pd.DataFrame,
     peaks: pd.DataFrame,
@@ -1532,5 +1613,6 @@ def refine_cluster_matches(
     matched_targets = legacy_fit.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
     matched_targets = refine_small_peak_integrations(processed, matched_targets)
     matched_targets = expand_final_peak_boundaries(processed, matched_targets)
+    matched_targets = tighten_dpa_overintegration_by_local_bounds(processed, matched_targets)
     matched_targets = enforce_target_rt_corridors(processed, matched_targets)
     return peaks, matched_targets
