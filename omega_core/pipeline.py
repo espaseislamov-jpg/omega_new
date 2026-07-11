@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import warnings
 
 import numpy as np
 import pandas as pd
 
 from . import chromatopy_adapter, clusters, io, matching, metrics, rt_profile, signal
+
+FULL_CHROMATOPY_ENGINE = os.environ.get("OMEGA_ENGINE", "current").strip().lower() in {"chromatopy", "chromatopy_clean", "full_chromatopy"}
 
 
 def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
@@ -28,6 +32,55 @@ def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFra
         "omega_report": omega["omega3_trio"],
     }
 
+
+
+def _prepare_chromatopy_matched_targets(matched: pd.DataFrame) -> pd.DataFrame:
+    out = matched.copy()
+    if "target_rt" in out and "corrected_target_rt" not in out:
+        out["corrected_target_rt"] = out["target_rt"]
+    if "matched_peak_id" not in out:
+        out["matched_peak_id"] = np.nan
+    if "match_score" not in out:
+        out["match_score"] = np.nan
+    for peak_id, row_idx in enumerate(out.index[out["found_rt"].notna()], start=1):
+        out.at[row_idx, "matched_peak_id"] = peak_id
+        out.at[row_idx, "match_score"] = 0.0
+    return rt_profile.annotate_rt_profile(out)
+
+
+def process_chromatopy_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
+    import omega_chromatopy_clean
+
+    config = omega_chromatopy_clean.IntegrationConfig(use_chromatopy_fit=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        clean_result = omega_chromatopy_clean.integrate_batch(dataframe, reference_targets, config)
+
+    processed = clean_result["processed_df"]
+    processed = signal.add_smoothing_and_derivatives(processed)[0] if "dy" not in processed else processed
+    matched_targets = _prepare_chromatopy_matched_targets(clean_result["matched_targets_df"])
+    omega = metrics.compute_omega(matched_targets)
+    peaks = pd.DataFrame({
+        "peak_id": pd.to_numeric(matched_targets["matched_peak_id"], errors="coerce"),
+        "apex_x": pd.to_numeric(matched_targets["found_rt"], errors="coerce"),
+        "area": pd.to_numeric(matched_targets["area"], errors="coerce"),
+    }).dropna(subset=["peak_id", "apex_x"]).reset_index(drop=True)
+    cluster_quality = metrics.compute_cluster_quality(matched_targets)
+    confidence = metrics.assess_confidence(matched_targets, peaks, omega, "chromatopy_clean", cluster_quality)
+    return {
+        "engine": "chromatopy_clean",
+        "processed_df": processed,
+        "best_window": config.smoothing_window,
+        "peaks_df": peaks,
+        "matched_targets_df": matched_targets,
+        "judge_decisions_df": pd.DataFrame(),
+        "rt_shift": clean_result.get("rt_shift", 0.0),
+        "omega": omega,
+        "omega_report": omega["omega3_trio"],
+        "boundary_mode": clean_result.get("boundary_mode", "chromatopy"),
+        "cluster_quality_score": cluster_quality,
+        "confidence": confidence,
+    }
 
 def _target_width(matched_targets: pd.DataFrame, code: str) -> float:
     row = matched_targets[matched_targets["code"] == code]
@@ -139,6 +192,13 @@ def _maybe_apply_asls_shape_fallback(
 
 
 def process_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
+    if FULL_CHROMATOPY_ENGINE:
+        try:
+            return process_chromatopy_batch(dataframe, reference_targets)
+        except Exception:
+            if os.environ.get("OMEGA_REQUIRE_CHROMATOPY", "0").strip() == "1":
+                raise
+
     processed = signal.add_baseline(dataframe, **signal.BASELINE_KWARGS)
     result = metrics.annotate_result(
         process_from_baseline(processed, reference_targets),
