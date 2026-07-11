@@ -566,6 +566,17 @@ def chromatopy_numeric_area(
     if x[end_idx] - x[start_idx] < 0.010:
         return bounded_valley_area(x, y, peak_idx, left_limit_x, right_limit_x)
 
+    # ChromatoPy's derivative crossing can occur on a shoulder while the peak is
+    # still descending.  Treat it as an initial boundary and complete both sides
+    # to the local signal minima inside the target RT corridor.  This preserves
+    # separation from neighbouring targets while preventing visibly truncated
+    # integrations.
+    valley = bounded_valley_area(x, y, peak_idx, left_limit_x, right_limit_x)
+    valley_start_idx = int(np.searchsorted(x, float(valley["start_x"]), side="left"))
+    valley_end_idx = int(np.searchsorted(x, float(valley["end_x"]), side="right") - 1)
+    start_idx = max(left_limit_idx, min(start_idx, valley_start_idx))
+    end_idx = min(right_limit_idx, max(end_idx, valley_end_idx))
+
     x_seg = x[start_idx:end_idx + 1]
     y_seg = np.clip(y[start_idx:end_idx + 1], 0.0, None)
     if len(x_seg) >= 3:
@@ -795,25 +806,11 @@ def apply_interpeak_boundary_guards(processed: pd.DataFrame, matched: pd.DataFra
             if separate_prepeak and np.isfinite(dha_start) and np.isfinite(dha_end) and dha_start < valley_x < dha_end:
                 _set_row_interval(out, dha_idx, processed, valley_x, float(dha_end), "prepeak_guard")
 
-    # If EPA is only a local maximum at the strict window edge, treat it as a shoulder, not a full peak.
-    epa_rows = out.index[out["code"] == "C20:5"].tolist()
-    if epa_rows:
-        epa_idx = epa_rows[0]
-        status = str(out.at[epa_idx, "status"])
-        epa_rt = pd.to_numeric(pd.Series([out.at[epa_idx, "found_rt"]]), errors="coerce").iloc[0]
-        epa_start = pd.to_numeric(pd.Series([out.at[epa_idx, "integration_start_x"]]), errors="coerce").iloc[0]
-        epa_end = pd.to_numeric(pd.Series([out.at[epa_idx, "integration_end_x"]]), errors="coerce").iloc[0]
-        strict_left = OMEGA_STRICT_WINDOWS["C20:5"][0] + float(rt_shift)
-        if (
-            "strict_local_max" in status
-            and np.isfinite(epa_rt)
-            and float(epa_rt) <= strict_left + 0.0025
-            and np.isfinite(epa_start)
-            and np.isfinite(epa_end)
-        ):
-            capped_end = min(float(epa_end), float(epa_rt) + 0.014)
-            if capped_end > float(epa_start) + 0.004:
-                _set_row_interval(out, epa_idx, processed, float(epa_start), capped_end, "edge_shoulder_cap")
+    # Do not cap an EPA interval merely because its apex is near the edge of the
+    # expected RT window.  RT windows identify peaks; they are not integration
+    # boundaries.  The previous ``apex + 0.014`` cap cut asymmetric peaks through
+    # a still-descending tail (notably the RT 8.3893 field case).  The numeric
+    # ChromatoPy/valley boundary selected above must remain authoritative.
 
     return out
 
