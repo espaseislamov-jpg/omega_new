@@ -5,6 +5,8 @@ import math
 import numpy as np
 import pandas as pd
 
+from . import rt_profile
+
 
 C22_OVERLAP_TRIGGER_OMEGA_MIN = 4.0
 C22_OVERLAP_RATIO_OFFSET = 1.25
@@ -74,6 +76,12 @@ C22_OVERLAP_MODEL_PARAMS = np.asarray([
 # gate fixes the remaining large EPA under-integration failures.
 ENABLE_DATA_DRIVEN_C20_EPA_MODEL = True
 C20_EPA_MODEL_GATE_RATIO_MAX = 0.25
+
+# EPA credit is valid for the older RT profile where the C20:5 shoulder is
+# routinely under-integrated into C20:3N8.  In the newer profile the same model
+# over-corrects badly, so gate it by the stable-anchor coefficient derived from
+# the manual workbook RTs.
+C20_EPA_MODEL_ANCHOR_COEFFICIENT_MAX = 0.99975
 C20_EPA_MODEL_BLEND = 0.25
 C20_EPA_OVERLAP_WIDE_NEIGHBOR_RATIO = 1.30
 C20_EPA_OVERLAP_EXTRA_SCALE = 1.60
@@ -168,6 +176,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         return "" if pd.isna(value) else str(value)
 
     epa, dha, dpa = area_of("C20:5"), area_of("C22:6"), area_of("C22:5")
+    anchor_coefficient = rt_profile.estimate_anchor_coefficient(valid)
     c20_3 = area_of("C20:3N8")
     c22_4 = area_of("C22:4")
     c18_2 = area_of("C18:2N6C")
@@ -208,6 +217,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     epa_to_c20_3_ratio = epa / c20_3 if c20_3 > 0 else np.nan
     if (
         ENABLE_DATA_DRIVEN_C20_EPA_MODEL
+        and np.isfinite(anchor_coefficient)
+        and anchor_coefficient <= C20_EPA_MODEL_ANCHOR_COEFFICIENT_MAX
         and c20_3 > 0
         and np.isfinite(epa_to_c20_3_ratio)
         and epa_to_c20_3_ratio < C20_EPA_MODEL_GATE_RATIO_MAX
@@ -370,6 +381,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "epa_overlap_fraction": epa_overlap_fraction,
         "epa_overlap_model_applied": epa_model_applied,
         "epa_overlap_extra_scale": epa_extra_scale,
+        "epa_anchor_coefficient": anchor_coefficient,
+        "epa_anchor_gate_max": C20_EPA_MODEL_ANCHOR_COEFFICIENT_MAX,
         "c22_overlap_source_area": c22_4,
         "c22_overlap_credit_area": c22_credit_area,
         "c22_overlap_fraction": c22_fraction,
