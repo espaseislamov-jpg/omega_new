@@ -2187,37 +2187,15 @@ def _attach_clean_matched_peak_ids(matched_targets_df: pd.DataFrame, peaks_df: p
 
 
 def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
-    config = omega_chromatopy_clean.IntegrationConfig(use_chromatopy_fit=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        clean_result = omega_chromatopy_clean.integrate_batch(dataframe, reference_targets, config)
-    processed_df = _add_derivatives_for_gui(clean_result["processed_df"])
-    peaks_df = _build_clean_peaks_df(processed_df, clean_result)
-    matched_targets_df = _attach_clean_matched_peak_ids(clean_result["matched_targets_df"], peaks_df)
-    omega = compute_clean_omega_metrics(matched_targets_df)
-    cluster_quality_score = _compute_cluster_quality_score(matched_targets_df)
-    confidence = build_confidence_assessment(
-        matched_targets_df=matched_targets_df,
-        peaks_df=peaks_df,
-        omega=omega,
-        baseline_mode="chromatopy_clean",
-        cluster_quality_score=cluster_quality_score,
-    )
-    return {
-        "engine": "chromatopy_clean",
-        "processed_df": processed_df,
-        "best_window": config.smoothing_window,
-        "peaks_df": peaks_df,
-        "matched_targets_df": matched_targets_df,
-        "rt_shift": clean_result.get("rt_shift", 0.0),
-        "omega": omega,
-        "omega_report": omega["omega3_trio"],
-        "total_area": omega["total_area"],
-        "baseline_mode": "chromatopy_clean",
-        "boundary_mode": clean_result.get("boundary_mode", "chromatopy"),
-        "cluster_quality_score": cluster_quality_score,
-        "confidence": confidence,
-    }
+    # The GUI must use the same engine that is exercised by omega_regression.py.
+    # The former clean-only route bypassed the validated C18/C20/C22 matching,
+    # cluster deconvolution, boundary judge and metric safeguards.  As a result a
+    # visually plausible chromatogram could still assign a shoulder to the wrong
+    # fatty acid and produce a large field-batch error.
+    result = dict(omega_core.process_batch(dataframe, reference_targets))
+    result["engine"] = "omega_core"
+    result.setdefault("total_area", result.get("omega", {}).get("total_area", np.nan))
+    return result
 
 
 def _compute_cluster_quality_score(matched_targets_df: pd.DataFrame) -> float:
@@ -4535,6 +4513,8 @@ class ChromatogramApp:
         engine = current_batch.get("engine", "") if current_batch is not None else ""
         if engine == "chromatopy_clean":
             omega = compute_clean_omega_metrics(self.matched_targets_df)
+        elif engine == "omega_core":
+            omega = core_metrics.compute_omega(self.matched_targets_df)
         else:
             omega = compute_omega_metrics(self.matched_targets_df)
         baseline_mode = current_batch.get("baseline_mode", "chebyshev") if current_batch is not None else "chebyshev"
