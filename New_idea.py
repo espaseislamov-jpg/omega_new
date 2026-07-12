@@ -3983,6 +3983,10 @@ class ChromatogramApp:
         self._batch_tree_syncing = False
         self._preload_batch_index = 0
         self._preload_after_id = None
+        self.batch_progress_window = None
+        self.batch_progress_label_var = tk.StringVar(value="")
+        self.batch_progress_detail_var = tk.StringVar(value="")
+        self.batch_progress_bar = None
         self.df_processed = None
         self.best_window = None
         self.peaks_df = pd.DataFrame()
@@ -4495,18 +4499,52 @@ class ChromatogramApp:
         try:
             self.current_file = Path(file_path)
             self.loaded_batches = omega_chromatopy_clean.load_batches(self.current_file, cutoff_minutes=4.0)
-            self.load_batch_at_index(0)
-            self.populate_main_batch_tree()
             if self._preload_after_id is not None:
                 self.root.after_cancel(self._preload_after_id)
+                self._preload_after_id = None
             self._preload_batch_index = 0
+            self.show_batch_progress_window()
             self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
             self.status_var.set(
                 f"Загружено проб: {len(self.loaded_batches)}. "
                 "Запускаю последовательный расчёт."
             )
         except Exception as e:
+            self.close_batch_progress_window()
             messagebox.showerror("Ошибка", str(e), parent=self.root)
+
+    def show_batch_progress_window(self):
+        self.close_batch_progress_window()
+        window = tk.Toplevel(self.root)
+        window.title("Анализ батча")
+        window.geometry("520x165")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, textvariable=self.batch_progress_label_var, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.batch_progress_detail_var).pack(anchor="w", pady=(8, 14))
+        self.batch_progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=max(len(self.loaded_batches), 1))
+        self.batch_progress_bar.pack(fill="x")
+        ttk.Label(frame, text="Дождитесь завершения анализа всех проб.").pack(anchor="w", pady=(12, 0))
+
+        self.batch_progress_window = window
+        window.grab_set()
+        window.lift()
+        window.focus_force()
+
+    def close_batch_progress_window(self):
+        window = self.batch_progress_window
+        self.batch_progress_window = None
+        self.batch_progress_bar = None
+        if window is not None and window.winfo_exists():
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
 
     def preload_loaded_batches(self):
         self._preload_after_id = None
@@ -4520,6 +4558,10 @@ class ChromatogramApp:
             self._preload_batch_index += 1
 
         if self._preload_batch_index >= total:
+            if self.batch_progress_bar is not None:
+                self.batch_progress_bar["value"] = total
+            self.close_batch_progress_window()
+            self.load_batch_at_index(0)
             self.populate_main_batch_tree()
             if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
                 self.populate_batch_results_tree()
@@ -4527,12 +4569,23 @@ class ChromatogramApp:
             return
 
         index = self._preload_batch_index
+        batch = self.loaded_batches[index]
+        sample_name = batch.get("sample_name", batch.get("file_name", f"Проба {index + 1}"))
+        self.batch_progress_label_var.set(f"Проба {index + 1} из {total}")
+        self.batch_progress_detail_var.set(f"Сейчас анализируется: {sample_name}")
+        if self.batch_progress_bar is not None:
+            self.batch_progress_bar["maximum"] = total
+            self.batch_progress_bar["value"] = index
+        self.root.update_idletasks()
         self.status_var.set(f"Расчёт пробы: {index + 1}/{total}")
-        self.process_batch(self.loaded_batches[index])
+        try:
+            self.process_batch(batch)
+        except Exception as exc:
+            self.close_batch_progress_window()
+            self.status_var.set(f"Ошибка при расчёте пробы {index + 1}/{total}")
+            messagebox.showerror("Ошибка анализа", f"{sample_name}\n\n{exc}", parent=self.root)
+            return
         self._preload_batch_index += 1
-        self.populate_main_batch_tree()
-        if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
-            self.populate_batch_results_tree()
         self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
     def refresh_peaks(self):
