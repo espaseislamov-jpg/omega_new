@@ -879,7 +879,16 @@ def refine_c18_c20_cluster_matches(
 
     c18_codes = ["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"]
     c18_choice = None
-    if _cluster_has_integration_overlap(out, c18_codes):
+    c18_cluster = out[out["code"].isin(c18_codes)].copy()
+    c18_has_missing = (
+        len(c18_cluster) != len(c18_codes)
+        or pd.to_numeric(c18_cluster.get("area"), errors="coerce").isna().any()
+    )
+    if (
+        c18_has_missing
+        or _cluster_has_duplicate_peak_ids(out, c18_codes)
+        or _cluster_has_integration_overlap(out, c18_codes)
+    ):
         c18_candidates = _collect_local_cluster_peak_geometries(
             df,
             window_left=7.56,
@@ -898,7 +907,28 @@ def refine_c18_c20_cluster_matches(
             row_idx = out.index[out["code"] == code]
             if len(row_idx):
                 row_idx_int = int(row_idx[0])
-                _assign_local_geometry_bounds_to_row(out, row_idx_int, geom, "matched_c18_local_bounds")
+                current_area = pd.to_numeric(
+                    pd.Series([out.at[row_idx_int, "area"]]), errors="coerce"
+                ).iloc[0]
+                if np.isfinite(current_area):
+                    _assign_local_geometry_bounds_to_row(out, row_idx_int, geom, "matched_c18_local_bounds")
+                else:
+                    if code == "C18:2N6C":
+                        gamma_rows = out.index[out["code"] == "C18:3N6"].tolist()
+                        if gamma_rows:
+                            gamma_idx = int(gamma_rows[0])
+                            gamma_rt = pd.to_numeric(
+                                pd.Series([out.at[gamma_idx, "found_rt"]]), errors="coerce"
+                            ).iloc[0]
+                            if np.isfinite(gamma_rt) and abs(float(gamma_rt) - float(geom["apex_x"])) <= 0.010:
+                                out.at[gamma_idx, "found_rt"] = np.nan
+                                out.at[gamma_idx, "area"] = np.nan
+                                out.at[gamma_idx, "integration_start_x"] = np.nan
+                                out.at[gamma_idx, "integration_end_x"] = np.nan
+                                out.at[gamma_idx, "matched_peak_id"] = np.nan
+                                out.at[gamma_idx, "match_score"] = np.nan
+                                out.at[gamma_idx, "status"] = "not_found_c18_reassigned"
+                    _assign_local_geometry_to_row(out, row_idx_int, geom, "matched_c18_local_recovered")
                 peak_match = peaks_lookup[(peaks_lookup["apex_x"] - float(geom["apex_x"])).abs() <= 0.006]
                 if not peak_match.empty:
                     out.at[row_idx_int, "matched_peak_id"] = int(peak_match.sort_values("area", ascending=False).iloc[0]["peak_id"])

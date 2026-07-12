@@ -2187,37 +2187,18 @@ def _attach_clean_matched_peak_ids(matched_targets_df: pd.DataFrame, peaks_df: p
 
 
 def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
-    config = omega_chromatopy_clean.IntegrationConfig(use_chromatopy_fit=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        clean_result = omega_chromatopy_clean.integrate_batch(dataframe, reference_targets, config)
-    processed_df = _add_derivatives_for_gui(clean_result["processed_df"])
-    peaks_df = _build_clean_peaks_df(processed_df, clean_result)
-    matched_targets_df = _attach_clean_matched_peak_ids(clean_result["matched_targets_df"], peaks_df)
-    omega = compute_clean_omega_metrics(matched_targets_df)
-    cluster_quality_score = _compute_cluster_quality_score(matched_targets_df)
-    confidence = build_confidence_assessment(
-        matched_targets_df=matched_targets_df,
-        peaks_df=peaks_df,
-        omega=omega,
-        baseline_mode="chromatopy_clean",
-        cluster_quality_score=cluster_quality_score,
-    )
-    return {
-        "engine": "chromatopy_clean",
-        "processed_df": processed_df,
-        "best_window": config.smoothing_window,
-        "peaks_df": peaks_df,
-        "matched_targets_df": matched_targets_df,
-        "rt_shift": clean_result.get("rt_shift", 0.0),
-        "omega": omega,
-        "omega_report": omega["omega3_trio"],
-        "total_area": omega["total_area"],
-        "baseline_mode": "chromatopy_clean",
-        "boundary_mode": clean_result.get("boundary_mode", "chromatopy"),
-        "cluster_quality_score": cluster_quality_score,
-        "confidence": confidence,
-    }
+    # The GUI must use the same engine that is exercised by omega_regression.py.
+    # The former clean-only route bypassed the validated C18/C20/C22 matching,
+    # cluster deconvolution, boundary judge and metric safeguards.  As a result a
+    # visually plausible chromatogram could still assign a shoulder to the wrong
+    # fatty acid and produce a large field-batch error.
+    engine_input = dataframe.copy()
+    if "x_corrected" not in engine_input.columns and "x" in engine_input.columns:
+        engine_input["x_corrected"] = pd.to_numeric(engine_input["x"], errors="coerce")
+    result = dict(omega_core.process_batch(engine_input, reference_targets))
+    result["engine"] = "omega_core"
+    result.setdefault("total_area", result.get("omega", {}).get("total_area", np.nan))
+    return result
 
 
 def _compute_cluster_quality_score(matched_targets_df: pd.DataFrame) -> float:
@@ -4000,6 +3981,12 @@ class ChromatogramApp:
         self.batch_results_window = None
         self.batch_results_tree = None
         self._batch_tree_syncing = False
+        self._preload_batch_index = 0
+        self._preload_after_id = None
+        self.batch_progress_window = None
+        self.batch_progress_label_var = tk.StringVar(value="")
+        self.batch_progress_detail_var = tk.StringVar(value="")
+        self.batch_progress_bar = None
         self.df_processed = None
         self.best_window = None
         self.peaks_df = pd.DataFrame()
@@ -4016,7 +4003,7 @@ class ChromatogramApp:
         self.integration_var = tk.StringVar(value="Integration: —")
         self.gamma_var = tk.StringVar(value="γ-Linolenic: —")
         self.batch_var = tk.StringVar(value="Series: —")
-        self.confidence_var = tk.StringVar(value="Уверенность: —")
+        self.confidence_var = tk.StringVar(value="Качество пиков: —")
         self.current_confidence = None
 
         self._build_ui()
@@ -4028,7 +4015,7 @@ class ChromatogramApp:
             controls,
             textvariable=self.confidence_var,
             command=self.show_confidence_details,
-            width=22,
+            width=25,
         )
         self.confidence_button.pack(side="right")
         self.confidence_button.state(["disabled"])
@@ -4157,17 +4144,18 @@ class ChromatogramApp:
     def show_confidence_details(self):
         confidence = self.current_confidence
         if not confidence or not np.isfinite(confidence.get("score", np.nan)):
-            messagebox.showinfo("Уверенность", "Нет данных для оценки уверенности.", parent=self.root)
+            messagebox.showinfo("Качество пиков", "Нет данных для оценки геометрии пиков.", parent=self.root)
             return
 
         lines = [
-            f"Уверенность: {int(round(confidence['score']))}/100",
+            f"Качество пиков: {int(round(confidence['score']))}/100",
             f"Статус: {confidence.get('label', '—')}",
+            "Это оценка геометрии/идентификации, а не прогноз завышения или занижения.",
             "",
         ]
         reasons = confidence.get("reasons") or []
         if reasons:
-            lines.append("Причины снижения уверенности:")
+            lines.append("Найденные дефекты/риски:")
             lines.extend(reasons)
         else:
             lines.append("Сильных причин для ручной проверки не найдено.")
@@ -4178,7 +4166,7 @@ class ChromatogramApp:
             lines.append("Контекст:")
             lines.extend(metrics)
 
-        messagebox.showinfo("Уверенность", "\n".join(lines), parent=self.root)
+        messagebox.showinfo("Качество пиков", "\n".join(lines), parent=self.root)
 
     def handle_target_selection(self, event=None):
         selection = self.tree.selection()
@@ -4447,7 +4435,9 @@ class ChromatogramApp:
         self.load_batch_at_index(target_index)
 
     def populate_batch_results_tree(self):
-        self._populate_batch_tree_widget(self.batch_results_tree, process_all=True)
+        # Do not process the whole file from a Tk callback.  A large field batch
+        # can take many seconds and blocks every window event while it runs.
+        self._populate_batch_tree_widget(self.batch_results_tree, process_all=False)
 
     def open_batch_results_window(self):
         if not self.loaded_batches:
@@ -4510,23 +4500,94 @@ class ChromatogramApp:
         try:
             self.current_file = Path(file_path)
             self.loaded_batches = omega_chromatopy_clean.load_batches(self.current_file, cutoff_minutes=4.0)
-            self.load_batch_at_index(0)
-            self.preload_loaded_batches()
+            if self._preload_after_id is not None:
+                self.root.after_cancel(self._preload_after_id)
+                self._preload_after_id = None
+            self._preload_batch_index = 0
+            self.show_batch_progress_window()
+            self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
+            self.status_var.set(
+                f"Загружено проб: {len(self.loaded_batches)}. "
+                "Запускаю последовательный расчёт."
+            )
         except Exception as e:
+            self.close_batch_progress_window()
             messagebox.showerror("Ошибка", str(e), parent=self.root)
 
+    def show_batch_progress_window(self):
+        self.close_batch_progress_window()
+        window = tk.Toplevel(self.root)
+        window.title("Анализ батча")
+        window.geometry("520x165")
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, textvariable=self.batch_progress_label_var, font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.batch_progress_detail_var).pack(anchor="w", pady=(8, 14))
+        self.batch_progress_bar = ttk.Progressbar(frame, mode="determinate", maximum=max(len(self.loaded_batches), 1))
+        self.batch_progress_bar.pack(fill="x")
+        ttk.Label(frame, text="Дождитесь завершения анализа всех проб.").pack(anchor="w", pady=(12, 0))
+
+        self.batch_progress_window = window
+        window.grab_set()
+        window.lift()
+        window.focus_force()
+
+    def close_batch_progress_window(self):
+        window = self.batch_progress_window
+        self.batch_progress_window = None
+        self.batch_progress_bar = None
+        if window is not None and window.winfo_exists():
+            try:
+                window.grab_release()
+            except tk.TclError:
+                pass
+            window.destroy()
+
     def preload_loaded_batches(self):
+        self._preload_after_id = None
         if not self.loaded_batches:
             return
         total = len(self.loaded_batches)
-        for index, batch in enumerate(self.loaded_batches):
-            if batch.get("processed_df") is None:
-                self.status_var.set(f"Предрасчёт batch: {index + 1}/{total}")
-                self.root.update_idletasks()
-                self.process_batch(batch)
-        self.populate_main_batch_tree()
-        if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
-            self.populate_batch_results_tree()
+        while (
+            self._preload_batch_index < total
+            and self.loaded_batches[self._preload_batch_index].get("processed_df") is not None
+        ):
+            self._preload_batch_index += 1
+
+        if self._preload_batch_index >= total:
+            if self.batch_progress_bar is not None:
+                self.batch_progress_bar["value"] = total
+            self.close_batch_progress_window()
+            self.load_batch_at_index(0)
+            self.populate_main_batch_tree()
+            if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
+                self.populate_batch_results_tree()
+            self.status_var.set(f"Рассчёт всех проб завершён: {total}/{total}")
+            return
+
+        index = self._preload_batch_index
+        batch = self.loaded_batches[index]
+        sample_name = batch.get("sample_name", batch.get("file_name", f"Проба {index + 1}"))
+        self.batch_progress_label_var.set(f"Проба {index + 1} из {total}")
+        self.batch_progress_detail_var.set(f"Сейчас анализируется: {sample_name}")
+        if self.batch_progress_bar is not None:
+            self.batch_progress_bar["maximum"] = total
+            self.batch_progress_bar["value"] = index
+        self.root.update_idletasks()
+        self.status_var.set(f"Расчёт пробы: {index + 1}/{total}")
+        try:
+            self.process_batch(batch)
+        except Exception as exc:
+            self.close_batch_progress_window()
+            self.status_var.set(f"Ошибка при расчёте пробы {index + 1}/{total}")
+            messagebox.showerror("Ошибка анализа", f"{sample_name}\n\n{exc}", parent=self.root)
+            return
+        self._preload_batch_index += 1
+        self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
     def refresh_peaks(self):
         if self.df_processed is None:
@@ -4535,19 +4596,30 @@ class ChromatogramApp:
         engine = current_batch.get("engine", "") if current_batch is not None else ""
         if engine == "chromatopy_clean":
             omega = compute_clean_omega_metrics(self.matched_targets_df)
+        elif engine == "omega_core":
+            omega = core_metrics.compute_omega(self.matched_targets_df)
         else:
             omega = compute_omega_metrics(self.matched_targets_df)
         baseline_mode = current_batch.get("baseline_mode", "chebyshev") if current_batch is not None else "chebyshev"
         cluster_quality_score = current_batch.get("cluster_quality_score", np.nan) if current_batch is not None else np.nan
         if engine == "chromatopy_clean":
             cluster_quality_score = _compute_cluster_quality_score(self.matched_targets_df)
-        confidence = build_confidence_assessment(
-            matched_targets_df=self.matched_targets_df,
-            peaks_df=self.peaks_df,
-            omega=omega,
-            baseline_mode=baseline_mode,
-            cluster_quality_score=cluster_quality_score,
-        )
+        if engine == "omega_core":
+            confidence = core_metrics.assess_confidence(
+                self.matched_targets_df,
+                self.peaks_df,
+                omega,
+                baseline_mode,
+                cluster_quality_score,
+            )
+        else:
+            confidence = build_confidence_assessment(
+                matched_targets_df=self.matched_targets_df,
+                peaks_df=self.peaks_df,
+                omega=omega,
+                baseline_mode=baseline_mode,
+                cluster_quality_score=cluster_quality_score,
+            )
         report_value = omega["omega3_trio"]
         if current_batch is not None:
             current_batch["processed_df"] = self.df_processed

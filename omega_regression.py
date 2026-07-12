@@ -311,7 +311,7 @@ def classify_result(row: dict) -> tuple[str, str, str]:
 
 
 
-def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
+def _legacy_safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
     """Return a reference-free high-error risk estimate for patient-result review.
 
     The rule set is a deliberately small surrogate judge trained from the current
@@ -375,6 +375,74 @@ def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
         band = "WATCH_NEAR_LIMIT"
     elif risk_score >= 35:
         band = "LOW_RISK_REVIEW_CONTEXT"
+    else:
+        band = "LOW_RISK"
+    return risk_score, band, predicted_direction, ",".join(dict.fromkeys(reasons))
+
+
+def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
+    """Estimate integration risk from explicit, inspectable failure modes.
+
+    The score means *risk of a structurally unreliable integration*, not whether
+    the reported omega value is high or low.  Direction is reported only where
+    the chromatographic failure has a defensible direction.
+    """
+    reasons: list[str] = []
+    risk_score = 0
+    predicted_direction = "unknown"
+
+    confidence = _safe_float(row.get("confidence"))
+    cluster_quality = _safe_float(row.get("cluster_quality_score"))
+    dha = _safe_float(row.get("omega_dha_area"))
+    strict = _safe_float(row.get("omega_omega3_trio_strict"))
+    final = _safe_float(row.get("omega_omega3_trio", row.get("calculated")))
+    spread = abs(final - strict) if np.isfinite(final) and np.isfinite(strict) else np.nan
+
+    c18_1_area = _safe_float(row.get("C18_1N9C_area"))
+    c18_3_area = _safe_float(row.get("C18_3N3_area"))
+    c18_1_rt = _safe_float(row.get("C18_1N9C_found_rt"))
+    c18_3_rt = _safe_float(row.get("C18_3N3_found_rt"))
+    c18_duplicate = bool(
+        np.all(np.isfinite([c18_1_area, c18_3_area, c18_1_rt, c18_3_rt]))
+        and abs(c18_1_rt - c18_3_rt) <= 0.002
+        and abs(c18_1_area - c18_3_area) <= 0.001 * max(c18_1_area, c18_3_area, 1.0)
+    )
+
+    c22_status = " ".join(
+        str(row.get(f"{code}_status", "")) for code in ["C22_6", "C22_5", "C22_4"]
+    )
+    if (np.isfinite(dha) and dha <= 0) or "not_found" in str(row.get("C22_6_status", "")):
+        risk_score = max(risk_score, 96)
+        predicted_direction = "likely_under_missing_dha"
+        reasons.append("missing_key_peak_dha")
+
+    if c18_duplicate:
+        risk_score = max(risk_score, 92)
+        predicted_direction = "denominator_identity_conflict"
+        reasons.append("duplicate_c18_component_assignment")
+
+    if np.isfinite(cluster_quality) and cluster_quality < 40:
+        risk_score = max(risk_score, 58)
+        reasons.append("cluster_identity_incomplete")
+    if np.isfinite(spread) and spread > 0.65:
+        risk_score = max(risk_score, 58)
+        reasons.append("large_strict_final_correction")
+
+    if np.isfinite(confidence) and confidence < 40:
+        risk_score = max(risk_score, 55)
+        reasons.append("low_peak_quality_score")
+
+    if "fit" in c22_status or "overlap" in c22_status:
+        risk_score = max(risk_score, 30)
+        reasons.append("c22_fit_or_overlap")
+
+    risk_score = int(min(100, risk_score))
+    if risk_score >= 85:
+        band = "HIGH_RISK_STRUCTURAL"
+    elif risk_score >= 55:
+        band = "MANUAL_REVIEW"
+    elif risk_score >= 30:
+        band = "WATCH_GEOMETRY"
     else:
         band = "LOW_RISK"
     return risk_score, band, predicted_direction, ",".join(dict.fromkeys(reasons))
@@ -883,14 +951,14 @@ def write_reports(
         else pd.DataFrame()
     )
     high_error = results["abs_delta"] > 0.5 if "abs_delta" in results else pd.Series(dtype=bool)
-    judge_positive = results["safety_judge_band"].eq("HIGH_RISK_GT_0_5") if "safety_judge_band" in results else pd.Series(dtype=bool)
+    judge_positive = results["safety_judge_band"].astype(str).str.startswith("HIGH_RISK") if "safety_judge_band" in results else pd.Series(dtype=bool)
     safety_summary = pd.DataFrame([
         {
-            "metric": "HIGH_RISK_GT_0_5 catch rate",
+            "metric": "HIGH_RISK structural catch rate",
             "value": f"{int((judge_positive & high_error).sum())}/{int(high_error.sum())}",
         },
         {
-            "metric": "HIGH_RISK_GT_0_5 review load",
+            "metric": "HIGH_RISK structural review load",
             "value": f"{int(judge_positive.sum())}/{len(results)}",
         },
         {

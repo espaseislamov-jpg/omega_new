@@ -93,12 +93,38 @@ def _target_width(matched_targets: pd.DataFrame, code: str) -> float:
     return float(end_x - start_x)
 
 
+def _target_area(matched_targets: pd.DataFrame, code: str) -> float:
+    row = matched_targets[matched_targets["code"] == code]
+    if row.empty:
+        return np.nan
+    return float(pd.to_numeric(row["area"], errors="coerce").iloc[0])
+
+
 def _target_status(matched_targets: pd.DataFrame, code: str) -> str:
     row = matched_targets[matched_targets["code"] == code]
     if row.empty:
         return ""
     value = row.iloc[0].get("status", "")
     return "" if pd.isna(value) else str(value)
+
+
+def _is_low_ratio_narrow_dha_shape(result: dict) -> bool:
+    matched_targets = result.get("matched_targets_df")
+    if matched_targets is None or matched_targets.empty:
+        return False
+    dha_width = _target_width(matched_targets, "C22:6")
+    c22_4_width = _target_width(matched_targets, "C22:4")
+    dpa_area = _target_area(matched_targets, "C22:5")
+    c22_4_area = _target_area(matched_targets, "C22:4")
+    strict_value = float(result.get("omega", {}).get("omega3_trio_strict", np.nan))
+    return bool(
+        np.all(np.isfinite([dha_width, c22_4_width, dpa_area, c22_4_area, strict_value]))
+        and c22_4_area > 0
+        and dha_width <= 0.030
+        and c22_4_width >= 0.040
+        and 0.35 <= dpa_area / c22_4_area <= 0.60
+        and strict_value >= 6.0
+    )
 
 
 def _should_try_asls_shape_fallback(result: dict) -> bool:
@@ -111,7 +137,7 @@ def _should_try_asls_shape_fallback(result: dict) -> bool:
     c22_status = " ".join(_target_status(matched_targets, code) for code in ["C22:6", "C22:5", "C22:4"])
     strict_value = float(result.get("omega", {}).get("omega3_trio_strict", np.nan))
 
-    return bool(
+    broad_cluster_shape = bool(
         np.isfinite(dha_width)
         and np.isfinite(c22_4_width)
         and dha_width >= 0.040
@@ -119,6 +145,8 @@ def _should_try_asls_shape_fallback(result: dict) -> bool:
         and "matched_c22_pvfit_tail" not in c22_status
         and (not np.isfinite(strict_value) or strict_value >= 4.0)
     )
+    low_ratio_narrow_dha_shape = _is_low_ratio_narrow_dha_shape(result)
+    return broad_cluster_shape or low_ratio_narrow_dha_shape
 
 
 def _c22_mean_width(result: dict) -> float:
@@ -155,10 +183,18 @@ def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
     candidate_spread = _omega_final_strict_spread(candidate)
     current_confidence = _confidence_score(current)
     candidate_confidence = _confidence_score(candidate)
+    current_omega = float(current.get("omega_report", np.nan))
+    candidate_omega = float(candidate.get("omega_report", np.nan))
 
     if not (np.isfinite(current_width) and np.isfinite(candidate_width)):
         return False
-    if candidate_width > current_width + 0.002:
+    if (
+        np.isfinite(current_omega)
+        and np.isfinite(candidate_omega)
+        and abs(candidate_omega - current_omega) > 0.45
+    ):
+        return False
+    if candidate_width > current_width + 0.002 and not _is_low_ratio_narrow_dha_shape(current):
         return False
     if np.isfinite(current_quality) and np.isfinite(candidate_quality) and candidate_quality < current_quality:
         return False

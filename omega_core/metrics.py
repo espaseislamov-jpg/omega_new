@@ -38,6 +38,8 @@ C22_WIDTH_BALANCE_NEGATIVE_POINTS = -0.10
 C22_LOW_RATIO_CREDIT_GUARD_MIN = 0.45
 C22_LOW_RATIO_CREDIT_GUARD_MAX = 0.55
 C22_LOW_RATIO_CREDIT_GUARD_STRICT_MAX = 5.50
+C22_MISSING_DHA_COELUTION_RATIO_MIN = 1.50
+C22_MISSING_DHA_COELUTION_CREDIT_FRACTION = 0.75
 C22_LOW_RATIO_CREDIT_GUARD_MAX_POINTS = 0.25
 
 C18_DENOMINATOR_DOMINANCE_RATIO = 1.60
@@ -142,6 +144,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overintegration_model_applied": False,
         "c22_width_balance_points": 0.0,
         "c22_width_balance_model_applied": False,
+        "c22_missing_dha_coelution_applied": False,
         "c18_denominator_scale": 1.0,
     }
     if matched_targets is None or matched_targets.empty:
@@ -169,7 +172,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         return float(end_x - start_x)
 
     def status_of(code: str) -> str:
-        row = valid[valid["code"] == code]
+        row = matched_targets[matched_targets["code"] == code]
         if row.empty or "status" not in row:
             return ""
         value = row["status"].iloc[0]
@@ -267,6 +270,14 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
 
     c22_ratio = dpa / c22_4 if c22_4 > 0 else np.nan
     c22_width_values = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
+    c22_missing_dha_coelution = bool(
+        dha <= 0
+        and dpa > 0
+        and c22_4 > 0
+        and np.isfinite(c22_ratio)
+        and c22_ratio >= C22_MISSING_DHA_COELUTION_RATIO_MIN
+        and "not_found" in status_of("C22:6")
+    )
     legacy_fraction = 0.0
     if c22_4 > 0 and np.isfinite(c22_ratio) and strict_value >= C22_OVERLAP_TRIGGER_OMEGA_MIN:
         legacy_fraction = float(np.clip(
@@ -316,6 +327,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     if finite_c22_widths.size == 3 and float(np.mean(finite_c22_widths)) > C22_OVERLAP_WIDE_CLUSTER_MEAN_WIDTH:
         c22_width_scale = C22_OVERLAP_WIDE_CLUSTER_SCALE
         c22_fraction *= c22_width_scale
+    if c22_missing_dha_coelution:
+        c22_fraction = max(c22_fraction, C22_MISSING_DHA_COELUTION_CREDIT_FRACTION)
     c22_credit_area = c22_4 * c22_fraction
     if (
         np.isfinite(c22_ratio)
@@ -335,6 +348,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         and dpa > 0
         and np.isfinite(c22_ratio)
         and c22_ratio > C22_DPA_OVERINTEGRATION_RATIO_MIN
+        and not c22_missing_dha_coelution
     ):
         max_debit_area = effective_total_area * C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS / 100.0
         c22_debit_area = float(np.clip(
@@ -396,6 +410,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         "c22_overintegration_model_applied": c22_debit_applied,
         "c22_width_balance_points": c22_width_balance_points,
         "c22_width_balance_model_applied": c22_width_balance_applied,
+        "c22_missing_dha_coelution_applied": c22_missing_dha_coelution,
         "c18_denominator_scale": c18_denominator_scale,
     })
     return result
@@ -490,13 +505,21 @@ def assess_confidence(
     spread = abs(omega_value - strict_value) if np.isfinite(omega_value) and np.isfinite(strict_value) else np.nan
 
     if baseline_mode != "chebyshev":
-        penalize(8.0, "Потребовался fallback baseline")
+        penalize(4.0, f"Использован резервный baseline ({baseline_mode})")
 
     if cluster_quality_score is not None and np.isfinite(cluster_quality_score) and cluster_quality_score < CLUSTER_QUALITY_COMPLETE_SCORE:
         gap = float(CLUSTER_QUALITY_COMPLETE_SCORE - cluster_quality_score)
         penalize(min(18.0, 6.0 + gap * 0.45), f"Качество кластеров ниже целевого ({cluster_quality_score:.1f})")
 
     matched_count = int(valid["matched_peak_id"].notna().sum())
+    matched_ids = valid.dropna(subset=["matched_peak_id"])[["code", "matched_peak_id"]].copy()
+    duplicate_ids = matched_ids[matched_ids["matched_peak_id"].duplicated(keep=False)]
+    duplicate_codes = sorted(duplicate_ids["code"].astype(str).unique().tolist())
+    if duplicate_codes:
+        penalize(
+            min(30.0, 18.0 + 3.0 * len(duplicate_codes)),
+            f"Один пик назначен нескольким компонентам: {', '.join(duplicate_codes)}",
+        )
     missing_count = int(max(0, len(valid) - matched_count))
     if missing_count > 0:
         penalize(min(18.0, 4.0 * missing_count), f"Есть неполные матчинг-пики ({missing_count})")
@@ -504,15 +527,16 @@ def assess_confidence(
     trio_codes = ["C20:5", "C22:6", "C22:5"]
     trio_missing = [code for code in trio_codes if area_of(code) <= 0]
     if trio_missing:
-        penalize(30.0, f"Отсутствуют ключевые omega-3 пики: {', '.join(trio_missing)}")
+        if bool(omega.get("c22_missing_dha_coelution_applied", False)) and trio_missing == ["C22:6"]:
+            penalize(22.0, "DHA не разделён с DPA; использован режим co-elution")
+        else:
+            penalize(35.0, f"Не найдены ключевые omega-3 пики: {', '.join(trio_missing)}")
 
     if np.isfinite(spread):
-        if spread > 0.45:
-            penalize(18.0, f"Сильный разброс strict/final omega ({spread:.2f})")
-        elif spread > 0.25:
-            penalize(10.0, f"Заметный разброс strict/final omega ({spread:.2f})")
-        elif spread > 0.12:
-            penalize(5.0, f"Небольшой разброс strict/final omega ({spread:.2f})")
+        if spread > 0.65:
+            penalize(14.0, f"Крупная коррекция strict/final omega ({spread:.2f})")
+        elif spread > 0.45:
+            penalize(7.0, f"Заметная коррекция strict/final omega ({spread:.2f})")
 
     c18_scale = float(omega.get("c18_denominator_scale", 1.0))
     c18_1 = area_of("C18:1N9C")
@@ -557,6 +581,8 @@ def assess_confidence(
         and w_c20_3 > w_epa * C20_EPA_UNDERFIT_WIDTH_RATIO
     ):
         penalize(10.0, "EPA выглядит недобранным относительно C20:3N8")
+    elif np.isfinite(epa_ratio) and epa_ratio < 0.30 and "matched_c20_local" in epa_status:
+        penalize(12.0, f"EPA мал относительно C20:3N8 (area ratio {epa_ratio:.2f})")
 
     c22_statuses = [status_of(code) for code in ["C22:6", "C22:5", "C22:4"]]
     c22_status_text = " ".join(status for status in c22_statuses if status)
@@ -570,7 +596,7 @@ def assess_confidence(
     elif "tailtight" in c22_status_text:
         penalize(6.0, "C22-кластер потребовал tail tightening")
     if c22_credit > 0:
-        penalize(4.0 if c22_credit < 80 else 8.0, f"C22 overlap-credit участвует в расчёте ({c22_credit:.1f})")
+        penalize(2.0 if c22_credit < 80 else 4.0, f"C22 overlap-credit участвует в расчёте ({c22_credit:.1f})")
     if np.isfinite(c22_mean_width):
         if c22_mean_width > 0.036:
             penalize(12.0, f"C22-кластер всё ещё широкий ({c22_mean_width:.3f} min)")
@@ -583,11 +609,11 @@ def assess_confidence(
 
     score = max(0.0, min(100.0, score))
     if score >= 85.0:
-        level = "Авто OK"
+        level = "Геометрия OK"
     elif score >= 70.0:
-        level = "Быстро проверить"
+        level = "Быстрая проверка"
     elif score >= 55.0:
-        level = "Проверить руками"
+        level = "Проверить границы"
     else:
         level = "Ручная проверка"
 
@@ -602,11 +628,19 @@ def assess_confidence(
     if cluster_quality_score is not None and np.isfinite(cluster_quality_score):
         metrics.append(f"Cluster quality: {cluster_quality_score:.1f}")
     metrics.append(f"Matched peaks: {matched_count}/{len(valid)}")
+    metrics.append(f"Уникальные peak ID: {matched_ids['matched_peak_id'].nunique()}/{matched_count}")
+    if np.isfinite(epa_ratio):
+        metrics.append(f"C20 area EPA/C20:3 = {epa_ratio:.2f}")
+    c22_ratio = float(omega.get("c22_reference_ratio", np.nan))
+    if np.isfinite(c22_ratio):
+        metrics.append(f"C22 area DPA/C22:4 = {c22_ratio:.2f}")
+    c22_debit = float(omega.get("c22_overintegration_debit_points", 0.0))
+    metrics.append(f"C22 коррекции: credit area {c22_credit:.1f}; debit {c22_debit:.2f} п.п.")
 
     result["score"] = score
     result["level"] = level
     result["label"] = level
-    result["button_text"] = f"Уверенность: {int(round(score))}"
+    result["button_text"] = f"Качество пиков: {int(round(score))}"
     result["reasons"] = reasons
     result["metrics"] = metrics
     return result

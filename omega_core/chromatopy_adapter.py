@@ -13,7 +13,7 @@ from scipy.signal import find_peaks
 from .signal import _get_x_column_name, _robust_sigma
 
 
-ENABLE_CHROMATOPY_INTEGRATION = os.environ.get("OMEGA_USE_CHROMATOPY_INTEGRATION", "1").strip() == "1"
+ENABLE_CHROMATOPY_INTEGRATION = os.environ.get("OMEGA_USE_CHROMATOPY_INTEGRATION", "0").strip() == "1"
 CHROMATOPY_FIT_MODE = os.environ.get("OMEGA_CHROMATOPY_FIT_MODE", "single").strip().lower()
 CHROMATOPY_GAUS_ITERATIONS = int(os.environ.get("OMEGA_CHROMATOPY_GAUS_ITERATIONS", "800"))
 CHROMATOPY_PK_SNS = float(os.environ.get("OMEGA_CHROMATOPY_PK_SNS", "0.001"))
