@@ -4560,6 +4560,7 @@ class ChromatogramApp:
         x_min=None,
         x_max=None,
         compact: bool = False,
+        normalized: bool = False,
     ):
         axis.clear()
         axis.set_facecolor("#fcfcfc")
@@ -4567,6 +4568,26 @@ class ChromatogramApp:
         y_smooth_draw = y_smooth
         fill_y_draw = fill_y
         marker_y_draw = marker_y
+        if normalized:
+            visible_mask = np.ones(len(x), dtype=bool)
+            if x_min is not None:
+                visible_mask &= x >= float(x_min)
+            if x_max is not None:
+                visible_mask &= x <= float(x_max)
+            if np.any(visible_mask):
+                local_candidates = [
+                    np.abs(y_smooth[visible_mask]),
+                    np.abs(marker_y[visible_mask]),
+                    np.abs(fill_y[visible_mask]),
+                ]
+                local_scale = max(
+                    1e-9,
+                    max(float(np.nanmax(values)) for values in local_candidates if values.size > 0),
+                )
+                y_draw = y / local_scale
+                y_smooth_draw = y_smooth / local_scale
+                fill_y_draw = fill_y / local_scale
+                marker_y_draw = marker_y / local_scale
         axis.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.55)
         axis.grid(color="#d9d9d9", linewidth=0.45, alpha=0.55)
         axis.plot(x, y_draw, linewidth=0.95 if compact else 1.0, color="#2a5b84", alpha=0.50, label="Corrected")
@@ -4666,7 +4687,10 @@ class ChromatogramApp:
                 visible_codes.append(str(row["code"]))
                 axis.text(
                     found_rt,
-                    marker_y_draw[apex_idx] + max(np.nanmax(marker_y_draw) * 0.010, 50.0 if compact else 80.0),
+                    marker_y_draw[apex_idx] + max(
+                        np.nanmax(marker_y_draw) * 0.010,
+                        0.06 if normalized else (50.0 if compact else 80.0),
+                    ),
                     str(row["code"]),
                     fontsize=6.4 if compact else 7,
                     rotation=90,
@@ -4708,10 +4732,19 @@ class ChromatogramApp:
                     color="#304860",
                     bbox={"boxstyle": "round,pad=0.20", "facecolor": "#ffffff", "edgecolor": "#d5dde5", "alpha": 0.85},
                 )
+            if normalized:
+                visible_mask = (x >= float(x_min)) & (x <= float(x_max))
+                local_min = float(np.nanmin(y_draw[visible_mask])) if np.any(visible_mask) else 0.0
+                local_max = float(np.nanmax(np.maximum.reduce([
+                    np.asarray(y_draw[visible_mask]),
+                    np.asarray(y_smooth_draw[visible_mask]),
+                    np.asarray(fill_y_draw[visible_mask]),
+                ]))) if np.any(visible_mask) else 1.0
+                axis.set_ylim(min(-0.08, local_min * 1.08), max(1.05, local_max * 1.12))
         axis.set_title(title, fontsize=9 if compact else 11, pad=6)
         axis.tick_params(labelsize=7 if compact else 9)
         axis.set_xlabel("Time, min", fontsize=8 if compact else 10)
-        axis.set_ylabel("Signal", fontsize=8 if compact else 10)
+        axis.set_ylabel("Norm." if normalized else "Signal", fontsize=8 if compact else 10)
         for spine in axis.spines.values():
             spine.set_color("#b8c2cc")
             spine.set_linewidth(0.8)
@@ -4743,7 +4776,6 @@ class ChromatogramApp:
             compact=False,
         )
         self.ax.legend(loc="upper right", fontsize=8)
-        main_y_limits = self.ax.get_ylim()
 
         for preview_ax, (label, x_min, x_max) in zip(self.preview_axes, self.preview_specs):
             self._draw_chromatogram_axis(
@@ -4759,8 +4791,8 @@ class ChromatogramApp:
                 x_min=x_min,
                 x_max=x_max,
                 compact=True,
+                normalized=True,
             )
-            preview_ax.set_ylim(*main_y_limits)
         if preserve_view and len(saved_views) == len(axes):
             for axis, (x_limits, y_limits) in zip(axes, saved_views):
                 axis.set_xlim(*x_limits)
