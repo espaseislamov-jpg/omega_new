@@ -2192,7 +2192,10 @@ def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.Da
     # cluster deconvolution, boundary judge and metric safeguards.  As a result a
     # visually plausible chromatogram could still assign a shoulder to the wrong
     # fatty acid and produce a large field-batch error.
-    result = dict(omega_core.process_batch(dataframe, reference_targets))
+    engine_input = dataframe.copy()
+    if "x_corrected" not in engine_input.columns and "x" in engine_input.columns:
+        engine_input["x_corrected"] = pd.to_numeric(engine_input["x"], errors="coerce")
+    result = dict(omega_core.process_batch(engine_input, reference_targets))
     result["engine"] = "omega_core"
     result.setdefault("total_area", result.get("omega", {}).get("total_area", np.nan))
     return result
