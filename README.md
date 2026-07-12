@@ -32,9 +32,8 @@ conda run -n omega python New_idea.py
 - `New_idea.py` — current GUI entry point.
 - `data/regression/` — committed historical regression CSV/XLSX pairs.
 - `data/archives/` — committed split archive parts used to recover the newest large batches.
-- `regression_outputs/` — committed reference reports from the latest regression runs.
+- `regression_outputs/` — local generated regression reports (ignored by Git).
 - `docs/` — investigation notes, diagnostics, and integration-plan documents.
-- `git_cloud_ready/` — older cloud-ready snapshot kept for reference.
 
 ## Extract uploaded archive data
 

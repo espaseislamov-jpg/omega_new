@@ -1,9 +1,11 @@
 __pycache__/
 *.py[cod]
+.agents/
 Desktop.part*.rar
 extracted_desktop/
 regression_debug/
 regression_data_all/
+regression_outputs/
 build/
 dist/
 *.spec.bak

@@ -5,7 +5,6 @@ import math
 import re
 import shutil
 import sys
-import warnings
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
@@ -28,9 +27,7 @@ from scipy.stats import median_abs_deviation
 
 import omega_core
 import omega_chromatopy_clean
-from omega_core import io as core_io
 from omega_core import metrics as core_metrics
-from omega_core import signal as core_signal
 
 try:
     import pyopenms as oms
@@ -2016,65 +2013,6 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float = 4.0):
     return sorted(batches, key=lambda batch: omega_sample_sort_key(batch.get("sample_name", batch.get("file_name", ""))))
 
 
-def compute_clean_omega_metrics(matched_targets_df: pd.DataFrame) -> dict:
-    result = {
-        "omega3_trio": np.nan,
-        "omega3_trio_strict": np.nan,
-        "omega3_trio_corrected": np.nan,
-        "total_area": np.nan,
-        "effective_total_area": np.nan,
-        "epa_area": 0.0,
-        "dha_area": 0.0,
-        "dpa_area": 0.0,
-        "epa_effective_area": 0.0,
-        "epa_neighbor_area": 0.0,
-        "epa_overlap_credit_area": 0.0,
-        "epa_overlap_fraction": 0.0,
-        "epa_overlap_model_applied": False,
-        "epa_overlap_extra_scale": 1.0,
-        "c22_overlap_source_area": 0.0,
-        "c22_overlap_credit_area": 0.0,
-        "c22_overlap_fraction": 0.0,
-        "c22_overlap_legacy_fraction": 0.0,
-        "c22_overlap_model_fraction": np.nan,
-        "c22_overlap_model_applied": False,
-        "c22_reference_ratio": np.nan,
-        "c22_width_scale": 1.0,
-        "c18_denominator_scale": 1.0,
-    }
-    if matched_targets_df is None or matched_targets_df.empty:
-        return result
-    valid = matched_targets_df.copy()
-    valid["area"] = pd.to_numeric(valid.get("area"), errors="coerce")
-    valid = valid.dropna(subset=["area"])
-    if valid.empty:
-        return result
-    total_area = float(valid["area"].sum())
-    if total_area <= 0 or not np.isfinite(total_area):
-        return result
-
-    def area_of(code: str) -> float:
-        row = valid[valid["code"] == code]
-        return float(row["area"].iloc[0]) if not row.empty else 0.0
-
-    epa = area_of("C20:5")
-    dha = area_of("C22:6")
-    dpa = area_of("C22:5")
-    omega_value = 100.0 * (epa + dha + dpa) / total_area
-    result.update({
-        "omega3_trio": omega_value,
-        "omega3_trio_strict": omega_value,
-        "omega3_trio_corrected": omega_value,
-        "total_area": total_area,
-        "effective_total_area": total_area,
-        "epa_area": epa,
-        "dha_area": dha,
-        "dpa_area": dpa,
-        "epa_effective_area": epa,
-    })
-    return result
-
-
 def _add_derivatives_for_gui(processed_df: pd.DataFrame) -> pd.DataFrame:
     out = processed_df.copy()
     x_col = _get_x_column_name(out)
@@ -2199,82 +2137,6 @@ def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.Da
     result["engine"] = "omega_core"
     result.setdefault("total_area", result.get("omega", {}).get("total_area", np.nan))
     return result
-
-
-def _compute_cluster_quality_score(matched_targets_df: pd.DataFrame) -> float:
-    if matched_targets_df is None or matched_targets_df.empty:
-        return -np.inf
-
-    cluster_groups = [
-        ["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"],
-        ["C20:4N6", "C20:5", "C20:3N8"],
-        ["C22:6", "C22:5", "C22:4"],
-    ]
-    score = 0.0
-    for cluster_codes in cluster_groups:
-        cluster = matched_targets_df.loc[matched_targets_df["code"].isin(cluster_codes), ["found_rt", "area", "matched_peak_id"]]
-        found_rt = pd.to_numeric(cluster["found_rt"], errors="coerce")
-        area = pd.to_numeric(cluster["area"], errors="coerce")
-        matched_peak_id = pd.to_numeric(cluster["matched_peak_id"], errors="coerce")
-        score += 5.0 * float(found_rt.notna().sum())
-        score -= 8.0 * float(area.isna().sum())
-
-        peak_ids = matched_peak_id.dropna().astype(int)
-        score -= 10.0 * float(peak_ids.duplicated().sum())
-
-        rt_values = found_rt.dropna().to_numpy(dtype=float)
-        if len(rt_values) >= 2:
-            score -= 1000.0 * float(np.sum(np.maximum(0.0, 0.004 - np.diff(rt_values))))
-    return float(score)
-
-
-def _annotate_processing_result(result: dict, baseline_mode: str) -> dict:
-    annotated = dict(result)
-    annotated["baseline_mode"] = baseline_mode
-    annotated["cluster_quality_score"] = _compute_cluster_quality_score(annotated["matched_targets_df"])
-    annotated["confidence"] = build_confidence_assessment(
-        matched_targets_df=annotated["matched_targets_df"],
-        peaks_df=annotated["peaks_df"],
-        omega=annotated["omega"],
-        baseline_mode=annotated["baseline_mode"],
-        cluster_quality_score=annotated["cluster_quality_score"],
-    )
-    return annotated
-
-
-def _process_chromatogram_from_baseline(processed_df: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
-    processed_df, best_window = add_savgol_and_derivatives_to_dataframe(
-        processed_df,
-        polyorder=SAVGOL_POLYORDER,
-        candidate_windows=SAVGOL_CANDIDATE_WINDOWS,
-    )
-    raw_peaks_df = detect_peaks_from_derivatives(
-        processed_df,
-        best_window=best_window,
-        height_sigma=PEAK_DETECTION_HEIGHT_SIGMA,
-        prominence_sigma=PEAK_DETECTION_PROMINENCE_SIGMA,
-    )
-    peaks_df = raw_peaks_df
-    matched_targets_df, rt_shift = dynamic_match_targets_to_peaks(reference_targets, peaks_df)
-    peaks_df, matched_targets_df = refine_c18_c20_cluster_matches(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = refine_overlapped_c22_cluster_areas(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = refine_cluster_areas_by_local_valleys(processed_df, matched_targets_df)
-    matched_targets_df = recover_missing_c22_components_with_fit(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = recover_underintegrated_c20_components_with_fit(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = recover_overlapped_c18_components_with_fit(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = tighten_overwide_c22_cluster_tails(processed_df, matched_targets_df)
-    matched_targets_df = refine_overwide_c22_cluster_with_pvfit(processed_df, peaks_df, matched_targets_df)
-    matched_targets_df = refine_small_peak_integrations(processed_df, matched_targets_df)
-    omega = compute_omega_metrics(matched_targets_df)
-    return {
-        "processed_df": processed_df,
-        "best_window": best_window,
-        "peaks_df": peaks_df,
-        "matched_targets_df": matched_targets_df,
-        "rt_shift": rt_shift,
-        "omega": omega,
-        "omega_report": omega["omega3_trio"],
-    }
 
 
 def estimate_rt_shift(expected_rts: np.ndarray, observed_rts: np.ndarray, max_shift: float = 0.15, step: float = 0.001, sigma: float = 0.025) -> float:
@@ -4163,23 +4025,16 @@ class ChromatogramApp:
             return
 
         lines = [
-            f"Качество пиков: {int(round(confidence['score']))}/100",
-            f"Статус: {confidence.get('label', '—')}",
-            "Это оценка геометрии/идентификации, а не прогноз завышения или занижения.",
+            f"Оценка: {int(round(confidence['score']))}/100",
+            f"Рекомендация: {confidence.get('label', '—')}",
             "",
         ]
         reasons = confidence.get("reasons") or []
         if reasons:
-            lines.append("Найденные дефекты/риски:")
+            lines.append("На что обратить внимание:")
             lines.extend(reasons)
         else:
-            lines.append("Сильных причин для ручной проверки не найдено.")
-
-        metrics = confidence.get("metrics") or []
-        if metrics:
-            lines.append("")
-            lines.append("Контекст:")
-            lines.extend(metrics)
+            lines.append("Заметных проблем не найдено.")
 
         messagebox.showinfo("Качество пиков", "\n".join(lines), parent=self.root)
 
@@ -4399,6 +4254,15 @@ class ChromatogramApp:
             rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text, confidence_text))
         return rows
 
+    @staticmethod
+    def _sample_number(sample_name: str) -> str:
+        text = str(sample_name or "").strip()
+        if re.match(r"^O\d+_", text, flags=re.IGNORECASE):
+            text = text.split("_", 1)[1]
+        if text.upper().endswith(".D"):
+            text = text[:-2]
+        return text
+
     def _populate_batch_tree_widget(self, tree: ttk.Treeview, process_all: bool = False):
         if tree is None:
             return
@@ -4407,7 +4271,8 @@ class ChromatogramApp:
             tree.delete(item_id)
         show_confidence = "confidence" in set(tree["columns"])
         for index, sample_name, value_text, confidence_text in self.build_batch_results_rows(process_all=process_all):
-            values = (sample_name, value_text, confidence_text) if show_confidence else (sample_name, value_text)
+            display_name = self._sample_number(sample_name) if tree is self.batch_results_tree else sample_name
+            values = (display_name, value_text, confidence_text) if show_confidence else (display_name, value_text)
             tree.insert("", "end", iid=str(index), values=values)
         if selected_iid is not None and tree.exists(selected_iid):
             self._batch_tree_syncing = True
@@ -4608,33 +4473,16 @@ class ChromatogramApp:
         if self.df_processed is None:
             return
         current_batch = self.loaded_batches[self.current_batch_index] if self.loaded_batches else None
-        engine = current_batch.get("engine", "") if current_batch is not None else ""
-        if engine == "chromatopy_clean":
-            omega = compute_clean_omega_metrics(self.matched_targets_df)
-        elif engine == "omega_core":
-            omega = core_metrics.compute_omega(self.matched_targets_df)
-        else:
-            omega = compute_omega_metrics(self.matched_targets_df)
+        omega = core_metrics.compute_omega(self.matched_targets_df)
         baseline_mode = current_batch.get("baseline_mode", "chebyshev") if current_batch is not None else "chebyshev"
-        cluster_quality_score = current_batch.get("cluster_quality_score", np.nan) if current_batch is not None else np.nan
-        if engine == "chromatopy_clean":
-            cluster_quality_score = _compute_cluster_quality_score(self.matched_targets_df)
-        if engine == "omega_core":
-            confidence = core_metrics.assess_confidence(
-                self.matched_targets_df,
-                self.peaks_df,
-                omega,
-                baseline_mode,
-                cluster_quality_score,
-            )
-        else:
-            confidence = build_confidence_assessment(
-                matched_targets_df=self.matched_targets_df,
-                peaks_df=self.peaks_df,
-                omega=omega,
-                baseline_mode=baseline_mode,
-                cluster_quality_score=cluster_quality_score,
-            )
+        cluster_quality_score = core_metrics.compute_cluster_quality(self.matched_targets_df)
+        confidence = core_metrics.assess_confidence(
+            self.matched_targets_df,
+            self.peaks_df,
+            omega,
+            baseline_mode,
+            cluster_quality_score,
+        )
         report_value = omega["omega3_trio"]
         if current_batch is not None:
             current_batch["processed_df"] = self.df_processed
@@ -4712,7 +4560,6 @@ class ChromatogramApp:
         x_min=None,
         x_max=None,
         compact: bool = False,
-        normalized: bool = False,
     ):
         axis.clear()
         axis.set_facecolor("#fcfcfc")
@@ -4720,27 +4567,6 @@ class ChromatogramApp:
         y_smooth_draw = y_smooth
         fill_y_draw = fill_y
         marker_y_draw = marker_y
-        if normalized:
-            visible_mask = np.ones(len(x), dtype=bool)
-            if x_min is not None:
-                visible_mask &= x >= float(x_min)
-            if x_max is not None:
-                visible_mask &= x <= float(x_max)
-            if np.any(visible_mask):
-                local_candidates = [
-                    np.abs(y_smooth[visible_mask]),
-                    np.abs(marker_y[visible_mask]),
-                    np.abs(fill_y[visible_mask]),
-                ]
-                local_scale = max(
-                    1e-9,
-                    max(float(np.nanmax(values)) for values in local_candidates if values.size > 0),
-                )
-                y_draw = y / local_scale
-                y_smooth_draw = y_smooth / local_scale
-                fill_y_draw = fill_y / local_scale
-                marker_y_draw = marker_y / local_scale
-
         axis.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.55)
         axis.grid(color="#d9d9d9", linewidth=0.45, alpha=0.55)
         axis.plot(x, y_draw, linewidth=0.95 if compact else 1.0, color="#2a5b84", alpha=0.50, label="Corrected")
@@ -4840,7 +4666,7 @@ class ChromatogramApp:
                 visible_codes.append(str(row["code"]))
                 axis.text(
                     found_rt,
-                    marker_y_draw[apex_idx] + max(np.nanmax(marker_y_draw) * 0.010, 0.06 if normalized else (50.0 if compact else 80.0)),
+                    marker_y_draw[apex_idx] + max(np.nanmax(marker_y_draw) * 0.010, 50.0 if compact else 80.0),
                     str(row["code"]),
                     fontsize=6.4 if compact else 7,
                     rotation=90,
@@ -4882,20 +4708,10 @@ class ChromatogramApp:
                     color="#304860",
                     bbox={"boxstyle": "round,pad=0.20", "facecolor": "#ffffff", "edgecolor": "#d5dde5", "alpha": 0.85},
                 )
-            if normalized:
-                visible_mask = (x >= float(x_min)) & (x <= float(x_max))
-                local_min = float(np.nanmin(y_draw[visible_mask])) if np.any(visible_mask) else 0.0
-                local_max = float(np.nanmax(np.maximum.reduce([
-                    np.asarray(y_draw[visible_mask]),
-                    np.asarray(y_smooth_draw[visible_mask]),
-                    np.asarray(fill_y_draw[visible_mask]),
-                ]))) if np.any(visible_mask) else 1.0
-                axis.set_ylim(min(-0.08, local_min * 1.08), max(1.05, local_max * 1.12))
-
         axis.set_title(title, fontsize=9 if compact else 11, pad=6)
         axis.tick_params(labelsize=7 if compact else 9)
         axis.set_xlabel("Time, min", fontsize=8 if compact else 10)
-        axis.set_ylabel("Norm." if normalized else "Signal", fontsize=8 if compact else 10)
+        axis.set_ylabel("Signal", fontsize=8 if compact else 10)
         for spine in axis.spines.values():
             spine.set_color("#b8c2cc")
             spine.set_linewidth(0.8)
@@ -4927,6 +4743,7 @@ class ChromatogramApp:
             compact=False,
         )
         self.ax.legend(loc="upper right", fontsize=8)
+        main_y_limits = self.ax.get_ylim()
 
         for preview_ax, (label, x_min, x_max) in zip(self.preview_axes, self.preview_specs):
             self._draw_chromatogram_axis(
@@ -4938,12 +4755,12 @@ class ChromatogramApp:
                 marker_y=marker_y,
                 selected_row=selected_row,
                 selected_peak=selected_peak,
-                title=f"Участок {label}",
+                title=f"Фрагмент основного графика: {label}",
                 x_min=x_min,
                 x_max=x_max,
                 compact=True,
-                normalized=True,
             )
+            preview_ax.set_ylim(*main_y_limits)
         if preserve_view and len(saved_views) == len(axes):
             for axis, (x_limits, y_limits) in zip(axes, saved_views):
                 axis.set_xlim(*x_limits)
