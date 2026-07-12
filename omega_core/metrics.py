@@ -22,6 +22,12 @@ C22_OVERLAP_WIDE_CLUSTER_SCALE = 0.65
 C22_DPA_OVERINTEGRATION_RATIO_MIN = 1.35
 C22_DPA_OVERINTEGRATION_DPA_FRACTION = 0.30
 C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS = 0.45
+# The narrow-DPA/broad-C22:4 shape is a reliable resolved-cluster guard only
+# inside the RT profile on which it was validated.  A later high-anchor profile
+# has the same apparent widths but systematically over-assigns the shared tail
+# to DPA, so it must retain the bounded over-integration debit.
+C22_RESOLVED_PROFILE_ANCHOR_MIN = 0.9999
+C22_RESOLVED_PROFILE_ANCHOR_MAX = 1.00065
 # Bounded C22 width-balance calibration learned from regression diagnostics.
 # It nudges narrow DPA/C22:4 cluster cases by at most a few tenths of an omega point.
 C22_WIDTH_BALANCE_DPA_WIDTH_MAX = 0.030
@@ -367,7 +373,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     resolved_broad_c22_reference = bool(
         np.all(np.isfinite([w_dpa, w_c22_4]))
         and np.isfinite(anchor_coefficient)
-        and anchor_coefficient >= 0.9999
+        and C22_RESOLVED_PROFILE_ANCHOR_MIN <= anchor_coefficient <= C22_RESOLVED_PROFILE_ANCHOR_MAX
         and w_dpa <= 0.030
         and w_c22_4 >= 0.035
         and w_c22_4 >= w_dpa + 0.009
