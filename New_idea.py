@@ -4246,7 +4246,7 @@ class ChromatogramApp:
         self.matched_targets_df.at[row_idx, "status"] = manual_status
         self.matched_targets_df = _recompute_matched_percent_area(self.matched_targets_df)
         self.selected_target_code = str(self.selected_target_code)
-        self.refresh_peaks()
+        self.refresh_peaks(preserve_plot_view=True)
         if self.selected_target_code in self.tree.get_children():
             self.tree.selection_set(self.selected_target_code)
             self.tree.focus(self.selected_target_code)
@@ -4308,7 +4308,7 @@ class ChromatogramApp:
             if np.isfinite(start_x):
                 x_value = max(x_value, float(start_x) + 1e-5)
             self.manual_end_var.set(f"{x_value:.5f}")
-        self.update_plot()
+        self.update_plot(preserve_view=True)
 
     def handle_manual_boundary_release(self, event):
         if self._manual_drag_active_boundary is None:
@@ -4589,7 +4589,7 @@ class ChromatogramApp:
         self._preload_batch_index += 1
         self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
-    def refresh_peaks(self):
+    def refresh_peaks(self, preserve_plot_view: bool = False):
         if self.df_processed is None:
             return
         current_batch = self.loaded_batches[self.current_batch_index] if self.loaded_batches else None
@@ -4653,10 +4653,10 @@ class ChromatogramApp:
                         gamma_text = f"{gamma_text} | peaks {gamma_percent:.2f}%"
         self.gamma_var.set(gamma_text)
         self.current_confidence = confidence
-        self.confidence_var.set(confidence.get("button_text", "Уверенность: —"))
+        self.confidence_var.set(confidence.get("button_text", "Качество пиков: —"))
         self.confidence_button.state(["!disabled"])
 
-        self.update_plot()
+        self.update_plot(preserve_view=preserve_plot_view)
         self.update_table()
 
         self.status_var.set(
@@ -4885,7 +4885,12 @@ class ChromatogramApp:
             spine.set_color("#b8c2cc")
             spine.set_linewidth(0.8)
 
-    def update_plot(self):
+    def update_plot(self, preserve_view: bool = False):
+        axes = [self.ax, *getattr(self, "preview_axes", [])]
+        saved_views = []
+        if preserve_view:
+            for axis in axes:
+                saved_views.append((axis.get_xlim(), axis.get_ylim()))
         x_col = _get_x_column_name(self.df_processed)
         x = self.df_processed[x_col].to_numpy(dtype=float)
         y = self.df_processed["y_corrected"].to_numpy(dtype=float)
@@ -4924,6 +4929,10 @@ class ChromatogramApp:
                 compact=True,
                 normalized=True,
             )
+        if preserve_view and len(saved_views) == len(axes):
+            for axis, (x_limits, y_limits) in zip(axes, saved_views):
+                axis.set_xlim(*x_limits)
+                axis.set_ylim(*y_limits)
         self.canvas.draw()
 
     def update_table(self):

@@ -933,6 +933,43 @@ def refine_c18_c20_cluster_matches(
                 if not peak_match.empty:
                     out.at[row_idx_int, "matched_peak_id"] = int(peak_match.sort_values("area", ascending=False).iloc[0]["peak_id"])
 
+    # If the C18:1 peak is unresolved, do not duplicate the only local peak ID.
+    # Preserve denominator mass with a transparent estimate from the two large
+    # neighbouring C18 components.  The row remains unmatched and therefore is
+    # still surfaced for manual review by the quality judge.
+    c18_1_rows = out.index[out["code"] == "C18:1N9C"].tolist()
+    if c18_1_rows:
+        c18_1_idx = int(c18_1_rows[0])
+        c18_1_area = pd.to_numeric(pd.Series([out.at[c18_1_idx, "area"]]), errors="coerce").iloc[0]
+
+        def c18_value(code: str, column: str) -> float:
+            rows = out.index[out["code"] == code].tolist()
+            if not rows:
+                return np.nan
+            return pd.to_numeric(pd.Series([out.at[int(rows[0]), column]]), errors="coerce").iloc[0]
+
+        c18_2_area = c18_value("C18:2N6C", "area")
+        c18_3_area = c18_value("C18:3N3", "area")
+        c18_0_area = c18_value("C18:0", "area")
+        c18_3_rt = c18_value("C18:3N3", "found_rt")
+        if (
+            not np.isfinite(c18_1_area)
+            and np.all(np.isfinite([c18_2_area, c18_3_area, c18_0_area, c18_3_rt]))
+            and c18_2_area > 0
+            and c18_0_area > 0
+            and c18_3_area > 0
+            and 7.60 <= c18_3_rt <= 7.69
+            and c18_3_area < 0.20 * min(c18_2_area, c18_0_area)
+        ):
+            estimated_area = float(np.sqrt(c18_2_area * c18_0_area))
+            out.at[c18_1_idx, "area"] = estimated_area
+            out.at[c18_1_idx, "found_rt"] = np.nan
+            out.at[c18_1_idx, "integration_start_x"] = np.nan
+            out.at[c18_1_idx, "integration_end_x"] = np.nan
+            out.at[c18_1_idx, "matched_peak_id"] = np.nan
+            out.at[c18_1_idx, "match_score"] = np.nan
+            out.at[c18_1_idx, "status"] = "estimated_c18_1_unresolved"
+
     c20_codes = ["C20:4N6", "C20:5", "C20:3N8"]
     c20_candidates = _collect_local_cluster_peak_geometries(
         df,

@@ -154,6 +154,18 @@ def _apply_target_cluster_override(
     for row_idx in out.index[conflict_mask]:
         _clear_match(out, int(row_idx))
 
+    # A cluster override may select a peak that was already assigned to another
+    # member of the same cluster by the soft-RT pass.  Keep exactly one owner for
+    # every selected peak instead of silently duplicating its area.
+    selected_owner = {int(peak["peak_id"]): code for code, peak in chosen.items()}
+    for row_idx, row in out.iterrows():
+        peak_id = pd.to_numeric(pd.Series([row.get("matched_peak_id")]), errors="coerce").iloc[0]
+        if not np.isfinite(peak_id):
+            continue
+        owner_code = selected_owner.get(int(peak_id))
+        if owner_code is not None and str(row.get("code")) != str(owner_code):
+            _clear_match(out, int(row_idx))
+
     for row_idx, row in out.iterrows():
         peak_row = chosen.get(row["code"])
         if peak_row is None:

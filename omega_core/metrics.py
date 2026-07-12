@@ -268,6 +268,26 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         epa_extra_scale *= C20_EPA_UNDERFIT_EXTRA_SCALE
         epa_credit_area *= C20_EPA_UNDERFIT_EXTRA_SCALE
 
+    # Keep the fitted-EPA correction monotonic at the two well-separated ends.
+    # An extremely small fitted EPA is a genuine unresolved shoulder, while a
+    # moderate EPA/C20:3 ratio does not need an additional overlap credit.
+    if "matched_c20_fit" in status_of("C20:5") and np.isfinite(epa_to_c20_3_ratio):
+        if (
+            epa_to_c20_3_ratio <= 0.10
+            and np.isfinite(c20_width_epa)
+            and np.isfinite(c20_width_neighbor)
+            and c20_width_epa <= 0.025
+            and c20_width_neighbor >= 2.0 * c20_width_epa
+        ):
+            epa_credit_area = max(epa_credit_area, 0.65 * c20_3)
+            epa_overlap_fraction = epa_credit_area / c20_3 if c20_3 > 0 else 0.0
+            epa_model_applied = True
+        elif epa_to_c20_3_ratio >= 0.18:
+            epa_credit_area = 0.0
+            epa_overlap_fraction = 0.0
+            epa_model_applied = False
+            epa_extra_scale = 1.0
+
     c22_ratio = dpa / c22_4 if c22_4 > 0 else np.nan
     c22_width_values = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
     c22_missing_dha_coelution = bool(
