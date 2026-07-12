@@ -3981,6 +3981,8 @@ class ChromatogramApp:
         self.batch_results_window = None
         self.batch_results_tree = None
         self._batch_tree_syncing = False
+        self._preload_batch_index = 0
+        self._preload_after_id = None
         self.df_processed = None
         self.best_window = None
         self.peaks_df = pd.DataFrame()
@@ -4495,25 +4497,43 @@ class ChromatogramApp:
             self.loaded_batches = omega_chromatopy_clean.load_batches(self.current_file, cutoff_minutes=4.0)
             self.load_batch_at_index(0)
             self.populate_main_batch_tree()
+            if self._preload_after_id is not None:
+                self.root.after_cancel(self._preload_after_id)
+            self._preload_batch_index = 0
+            self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
             self.status_var.set(
                 f"Загружено проб: {len(self.loaded_batches)}. "
-                "Остальные рассчитываются при переходе."
+                "Запускаю последовательный расчёт."
             )
         except Exception as e:
             messagebox.showerror("Ошибка", str(e), parent=self.root)
 
     def preload_loaded_batches(self):
+        self._preload_after_id = None
         if not self.loaded_batches:
             return
         total = len(self.loaded_batches)
-        for index, batch in enumerate(self.loaded_batches):
-            if batch.get("processed_df") is None:
-                self.status_var.set(f"Предрасчёт batch: {index + 1}/{total}")
-                self.root.update_idletasks()
-                self.process_batch(batch)
+        while (
+            self._preload_batch_index < total
+            and self.loaded_batches[self._preload_batch_index].get("processed_df") is not None
+        ):
+            self._preload_batch_index += 1
+
+        if self._preload_batch_index >= total:
+            self.populate_main_batch_tree()
+            if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
+                self.populate_batch_results_tree()
+            self.status_var.set(f"Рассчёт всех проб завершён: {total}/{total}")
+            return
+
+        index = self._preload_batch_index
+        self.status_var.set(f"Расчёт пробы: {index + 1}/{total}")
+        self.process_batch(self.loaded_batches[index])
+        self._preload_batch_index += 1
         self.populate_main_batch_tree()
         if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
             self.populate_batch_results_tree()
+        self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
     def refresh_peaks(self):
         if self.df_processed is None:
