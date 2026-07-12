@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import itertools
+
 import numpy as np
 import pandas as pd
 
@@ -192,18 +194,47 @@ def apply_c22_cluster_override(
     target_apexes = [9.252, 9.285, 9.316]
     max_distances = [0.020, 0.020, 0.020]
 
+    # Assign the whole ordered cluster at once.  A greedy left-to-right pass can
+    # give the rightmost C22:4 peak to C22:5 when the middle shoulder is not
+    # detected as a standalone peak.  Global ordered matching leaves the middle
+    # component missing instead, so the deconvolution stage can recover it.
+    adjusted_targets = np.asarray(target_apexes, dtype=float) + float(rt_shift)
+    candidate_pool = np.flatnonzero(
+        (peaks_apex >= adjusted_targets[0] - max(max_distances))
+        & (peaks_apex <= adjusted_targets[-1] + max(max_distances))
+    ).tolist()
+    best_assignment = None
+    best_key = None
+    max_size = min(len(cluster_codes), len(candidate_pool))
+    for assignment_size in range(max_size, 1, -1):
+        for code_positions in itertools.combinations(range(len(cluster_codes)), assignment_size):
+            for peak_positions in itertools.combinations(candidate_pool, assignment_size):
+                distances = [
+                    abs(float(peaks_apex[peak_pos]) - float(adjusted_targets[code_pos]))
+                    for code_pos, peak_pos in zip(code_positions, peak_positions)
+                ]
+                if any(
+                    distance > float(max_distances[code_pos])
+                    for code_pos, distance in zip(code_positions, distances)
+                ):
+                    continue
+                normalized_distance = sum(
+                    distance / max(float(max_distances[code_pos]), 1e-9)
+                    for code_pos, distance in zip(code_positions, distances)
+                )
+                prominence_tiebreak = sum(np.log1p(max(float(peaks_prominence[pos]), 0.0)) for pos in peak_positions)
+                area_tiebreak = sum(np.log1p(max(float(peaks_area[pos]), 0.0)) for pos in peak_positions)
+                key = (-assignment_size, normalized_distance, -prominence_tiebreak, -area_tiebreak)
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_assignment = list(zip(code_positions, peak_positions))
+        if best_assignment is not None:
+            break
+
     chosen = {}
-    used_mask = np.zeros(len(peaks), dtype=bool)
-    for code, target_apex, max_distance in zip(cluster_codes, target_apexes, max_distances):
-        adjusted_target = float(target_apex + rt_shift)
-        distances = np.abs(peaks_apex - adjusted_target)
-        candidate_positions = np.flatnonzero((~used_mask) & (distances <= max_distance))
-        if candidate_positions.size == 0:
-            continue
-        best_pos = _select_best_peak_position(candidate_positions, distances, peaks_prominence, peaks_area)
-        peak_row = peaks.iloc[best_pos]
-        chosen[code] = peak_row
-        used_mask[best_pos] = True
+    if best_assignment is not None:
+        for code_pos, peak_pos in best_assignment:
+            chosen[cluster_codes[code_pos]] = peaks.iloc[peak_pos]
 
     if len(chosen) < 2:
         return out

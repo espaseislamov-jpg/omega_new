@@ -194,6 +194,9 @@ def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
     candidate_confidence = _confidence_score(candidate)
     current_omega = float(current.get("omega_report", np.nan))
     candidate_omega = float(candidate.get("omega_report", np.nan))
+    candidate_omega_data = candidate.get("omega", {})
+    candidate_c22_ratio = float(candidate_omega_data.get("c22_reference_ratio", np.nan))
+    candidate_c22_debit = float(candidate_omega_data.get("c22_overintegration_debit_points", 0.0))
 
     if not (np.isfinite(current_width) and np.isfinite(candidate_width)):
         return False
@@ -202,10 +205,16 @@ def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
         and np.isfinite(candidate_omega)
         and abs(candidate_omega - current_omega) > 0.45
     ):
-        return False
-    candidate_omega_data = candidate.get("omega", {})
-    candidate_c22_ratio = float(candidate_omega_data.get("c22_reference_ratio", np.nan))
-    candidate_c22_debit = float(candidate_omega_data.get("c22_overintegration_debit_points", 0.0))
+        allow_high_omega_c22_downshift = bool(
+            current_omega >= 9.0
+            and candidate_omega < current_omega
+            and current_omega - candidate_omega <= 1.10
+            and np.isfinite(candidate_c22_ratio)
+            and 1.35 <= candidate_c22_ratio <= 1.90
+            and candidate_c22_debit > 0
+        )
+        if not allow_high_omega_c22_downshift:
+            return False
     if (
         np.isfinite(current_omega)
         and np.isfinite(candidate_omega)

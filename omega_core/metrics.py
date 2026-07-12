@@ -363,12 +363,22 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     c22_debit_area = 0.0
     c22_debit_points = 0.0
     c22_debit_applied = False
+    w_dha, w_dpa, w_c22_4 = c22_width_values
+    resolved_broad_c22_reference = bool(
+        np.all(np.isfinite([w_dpa, w_c22_4]))
+        and np.isfinite(anchor_coefficient)
+        and anchor_coefficient >= 0.9999
+        and w_dpa <= 0.030
+        and w_c22_4 >= 0.035
+        and w_c22_4 >= w_dpa + 0.009
+    )
     if (
         c22_4 > 0
         and dpa > 0
         and np.isfinite(c22_ratio)
         and c22_ratio > C22_DPA_OVERINTEGRATION_RATIO_MIN
         and not c22_missing_dha_coelution
+        and not resolved_broad_c22_reference
     ):
         max_debit_area = effective_total_area * C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS / 100.0
         c22_debit_area = float(np.clip(
@@ -381,7 +391,6 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
 
     c22_width_balance_points = 0.0
     c22_width_balance_applied = False
-    w_dha, w_dpa, w_c22_4 = c22_width_values
     if np.all(np.isfinite([w_dha, w_dpa, w_c22_4])) and w_dpa <= C22_WIDTH_BALANCE_DPA_WIDTH_MAX:
         if w_c22_4 <= C22_WIDTH_BALANCE_C22_4_NARROW_MAX:
             if w_dha <= C22_WIDTH_BALANCE_DHA_WIDTH_MAX:
@@ -609,7 +618,9 @@ def assess_confidence(
     c22_credit = float(omega.get("c22_overlap_credit_area", 0.0))
     c22_widths = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
     c22_mean_width = float(np.nanmean(c22_widths)) if np.isfinite(c22_widths).any() else np.nan
-    if "matched_c22_pvfit" in c22_status_text:
+    if "recovered_c22_local_unresolved" in c22_status_text:
+        penalize(14.0, "C22:5 восстановлен внутри ожидаемого интервала без отдельного peak ID")
+    elif "matched_c22_pvfit" in c22_status_text:
         penalize(12.0, "C22-кластер потребовал pvfit refinement")
     elif "matched_c22_fit" in c22_status_text:
         penalize(10.0, "C22-кластер потребовал fit-восстановление")

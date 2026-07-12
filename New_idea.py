@@ -3869,15 +3869,30 @@ def recover_missing_c22_components_with_fit(
         return out
     current_cluster_total = float(area_by_code.fillna(0.0).sum())
 
+    nominal_centers = {
+        "C22:6": 9.252,
+        "C22:5": 9.285,
+        "C22:4": 9.316,
+    }
+    observed_shifts = []
+    for code in c22_codes:
+        found_rt = pd.to_numeric(
+            cluster.loc[cluster["code"] == code, "found_rt"], errors="coerce"
+        ).iloc[0]
+        if np.isfinite(found_rt):
+            observed_shifts.append(float(found_rt) - nominal_centers[code])
+    cluster_shift = float(np.median(observed_shifts)) if observed_shifts else 0.0
+    shifted_centers = [nominal_centers[code] + cluster_shift for code in c22_codes]
+
     fit_out, _ = _refine_cluster_with_deconvolution(
         df=df,
         peaks_df=peaks_df,
         matched_targets_df=out,
         cluster_codes=c22_codes,
-        default_centers=[9.247, 9.280, 9.310],
+        default_centers=shifted_centers,
         window_left=9.22,
         window_right=9.33,
-        center_tolerances=[0.010, 0.010, 0.010],
+        center_tolerances=[0.012, 0.012, 0.012],
         status="matched_c22_fit",
     )
     fitted_cluster = fit_out[fit_out["code"].isin(c22_codes)].copy()
