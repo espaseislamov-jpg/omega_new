@@ -4428,7 +4428,9 @@ class ChromatogramApp:
         self.load_batch_at_index(target_index)
 
     def populate_batch_results_tree(self):
-        self._populate_batch_tree_widget(self.batch_results_tree, process_all=True)
+        # Do not process the whole file from a Tk callback.  A large field batch
+        # can take many seconds and blocks every window event while it runs.
+        self._populate_batch_tree_widget(self.batch_results_tree, process_all=False)
 
     def open_batch_results_window(self):
         if not self.loaded_batches:
@@ -4492,7 +4494,11 @@ class ChromatogramApp:
             self.current_file = Path(file_path)
             self.loaded_batches = omega_chromatopy_clean.load_batches(self.current_file, cutoff_minutes=4.0)
             self.load_batch_at_index(0)
-            self.preload_loaded_batches()
+            self.populate_main_batch_tree()
+            self.status_var.set(
+                f"Загружено проб: {len(self.loaded_batches)}. "
+                "Остальные рассчитываются при переходе."
+            )
         except Exception as e:
             messagebox.showerror("Ошибка", str(e), parent=self.root)
 
