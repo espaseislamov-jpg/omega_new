@@ -4003,7 +4003,7 @@ class ChromatogramApp:
         self.integration_var = tk.StringVar(value="Integration: —")
         self.gamma_var = tk.StringVar(value="γ-Linolenic: —")
         self.batch_var = tk.StringVar(value="Series: —")
-        self.confidence_var = tk.StringVar(value="Уверенность: —")
+        self.confidence_var = tk.StringVar(value="Качество пиков: —")
         self.current_confidence = None
 
         self._build_ui()
@@ -4015,7 +4015,7 @@ class ChromatogramApp:
             controls,
             textvariable=self.confidence_var,
             command=self.show_confidence_details,
-            width=22,
+            width=25,
         )
         self.confidence_button.pack(side="right")
         self.confidence_button.state(["disabled"])
@@ -4144,17 +4144,18 @@ class ChromatogramApp:
     def show_confidence_details(self):
         confidence = self.current_confidence
         if not confidence or not np.isfinite(confidence.get("score", np.nan)):
-            messagebox.showinfo("Уверенность", "Нет данных для оценки уверенности.", parent=self.root)
+            messagebox.showinfo("Качество пиков", "Нет данных для оценки геометрии пиков.", parent=self.root)
             return
 
         lines = [
-            f"Уверенность: {int(round(confidence['score']))}/100",
+            f"Качество пиков: {int(round(confidence['score']))}/100",
             f"Статус: {confidence.get('label', '—')}",
+            "Это оценка геометрии/идентификации, а не прогноз завышения или занижения.",
             "",
         ]
         reasons = confidence.get("reasons") or []
         if reasons:
-            lines.append("Причины снижения уверенности:")
+            lines.append("Найденные дефекты/риски:")
             lines.extend(reasons)
         else:
             lines.append("Сильных причин для ручной проверки не найдено.")
@@ -4165,7 +4166,7 @@ class ChromatogramApp:
             lines.append("Контекст:")
             lines.extend(metrics)
 
-        messagebox.showinfo("Уверенность", "\n".join(lines), parent=self.root)
+        messagebox.showinfo("Качество пиков", "\n".join(lines), parent=self.root)
 
     def handle_target_selection(self, event=None):
         selection = self.tree.selection()
@@ -4603,13 +4604,22 @@ class ChromatogramApp:
         cluster_quality_score = current_batch.get("cluster_quality_score", np.nan) if current_batch is not None else np.nan
         if engine == "chromatopy_clean":
             cluster_quality_score = _compute_cluster_quality_score(self.matched_targets_df)
-        confidence = build_confidence_assessment(
-            matched_targets_df=self.matched_targets_df,
-            peaks_df=self.peaks_df,
-            omega=omega,
-            baseline_mode=baseline_mode,
-            cluster_quality_score=cluster_quality_score,
-        )
+        if engine == "omega_core":
+            confidence = core_metrics.assess_confidence(
+                self.matched_targets_df,
+                self.peaks_df,
+                omega,
+                baseline_mode,
+                cluster_quality_score,
+            )
+        else:
+            confidence = build_confidence_assessment(
+                matched_targets_df=self.matched_targets_df,
+                peaks_df=self.peaks_df,
+                omega=omega,
+                baseline_mode=baseline_mode,
+                cluster_quality_score=cluster_quality_score,
+            )
         report_value = omega["omega3_trio"]
         if current_batch is not None:
             current_batch["processed_df"] = self.df_processed
