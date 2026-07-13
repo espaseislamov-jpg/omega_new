@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
+from omega_batch_order import sort_batches_by_acquisition
 
 configure_windows_path_compat()
 
@@ -1890,17 +1891,6 @@ def extract_sample_name_from_text(text: str, fallback: str) -> str:
     return match.group(0) if match else fallback
 
 
-def omega_sample_sort_key(name: str):
-    text = name or ""
-    match = re.search(r"\bO(\d+)\b", text)
-    if match:
-        return (0, int(match.group(1)), text)
-    match = re.search(r"\bO(\d+)", text)
-    if match:
-        return (0, int(match.group(1)), text)
-    return (1, text)
-
-
 def finalize_chromatogram_dataframe(df: pd.DataFrame, cutoff_minutes: float = 4.0) -> pd.DataFrame:
     df = df.copy()
     df["x"] = pd.to_numeric(df["x"], errors="coerce")
@@ -2010,7 +2000,7 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float = 4.0):
     flush_current()
     if not batches:
         raise ValueError("Не удалось разобрать серии из CHROMTAB.CSV.")
-    return sorted(batches, key=lambda batch: omega_sample_sort_key(batch.get("sample_name", batch.get("file_name", ""))))
+    return sort_batches_by_acquisition(batches)
 
 
 def _add_derivatives_for_gui(processed_df: pd.DataFrame) -> pd.DataFrame:
