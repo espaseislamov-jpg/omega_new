@@ -11,6 +11,11 @@ RELIABLE_RT_DOMINANT_DISTANCE_MAX = 0.025
 RELIABLE_RT_DOMINANT_AREA_MULTIPLIER = 8.0
 RELIABLE_RT_DOMINANT_AREA_MIN_DELTA = 400.0
 
+# C18:3N6 is a small, optional peak immediately before the four-peak C18
+# cluster.  If it is absent, a nearest-peak fallback must not let it consume
+# C18:2N6C and shift every subsequent assignment by one position.
+NO_NEAREST_FALLBACK_CODES = {"C18:3N6"}
+
 
 def estimate_rt_shift(
     expected_rts: np.ndarray,
@@ -300,6 +305,8 @@ def match_targets_to_peaks(targets_df: pd.DataFrame, peaks_df: pd.DataFrame) -> 
             continue
         local_positions = candidate_positions[distances[candidate_positions] <= RELIABLE_RT_WINDOW]
         if local_positions.size == 0:
+            if str(out.at[i, "code"]) in NO_NEAREST_FALLBACK_CODES:
+                continue
             best_pos = int(candidate_positions[np.argmin(distances[candidate_positions])])
             best_distance = float(distances[best_pos])
         else:

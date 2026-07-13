@@ -179,6 +179,8 @@ def _select_ordered_cluster_peaks(
     target_apexes,
     max_distances,
     min_apex_gaps=None,
+    allow_common_shift: bool = False,
+    max_common_shift: float = 0.0,
 ):
     if candidates_df is None or candidates_df.empty:
         return None
@@ -192,7 +194,16 @@ def _select_ordered_cluster_peaks(
     best_choice = None
     for combo in itertools.combinations(range(len(candidates)), len(target_apexes)):
         chosen = candidates.iloc[list(combo)].copy().reset_index(drop=True)
-        distances = [abs(float(chosen.iloc[i]["apex_x"]) - target_apexes[i]) for i in range(len(target_apexes))]
+        observed_apexes = chosen["apex_x"].to_numpy(dtype=float)
+        common_shift = 0.0
+        if allow_common_shift:
+            common_shift = float(np.median(observed_apexes - np.asarray(target_apexes, dtype=float)))
+            if abs(common_shift) > float(max_common_shift):
+                continue
+        distances = [
+            abs(float(observed_apexes[i]) - (target_apexes[i] + common_shift))
+            for i in range(len(target_apexes))
+        ]
         if any(distance > max_distances[i] for i, distance in enumerate(distances)):
             continue
         if min_apex_gaps is not None:
@@ -202,6 +213,7 @@ def _select_ordered_cluster_peaks(
                 continue
         score = (
             float(sum(distances))
+            + 0.10 * abs(common_shift)
             - 1e-6 * float(chosen["prominence"].sum())
             - 1e-7 * float(chosen["area"].sum())
         )
@@ -247,6 +259,8 @@ def _assign_local_geometry_to_row(out: pd.DataFrame, row_idx: int, geom: pd.Seri
 
 def _assign_local_geometry_bounds_to_row(out: pd.DataFrame, row_idx: int, geom: pd.Series, status: str) -> None:
     out.at[row_idx, "found_rt"] = float(geom["apex_x"])
+    out.at[row_idx, "area"] = float(geom["area"])
+    out.at[row_idx, "percent_area"] = np.nan
     out.at[row_idx, "integration_start_x"] = float(geom["start_x"])
     out.at[row_idx, "integration_end_x"] = float(geom["end_x"])
     out.at[row_idx, "status"] = status
@@ -900,6 +914,8 @@ def refine_c18_c20_cluster_matches(
             c18_candidates,
             target_apexes=[7.593, 7.623, 7.650, 7.750],
             max_distances=[0.022, 0.022, 0.025, 0.028],
+            allow_common_shift=True,
+            max_common_shift=0.035,
         )
     if c18_choice is not None:
         peaks_lookup = peaks_out.copy()
