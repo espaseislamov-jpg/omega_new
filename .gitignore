@@ -8,4 +8,5 @@ regression_data_all/
 regression_outputs/
 build/
 dist/
+installer_output/
 *.spec.bak

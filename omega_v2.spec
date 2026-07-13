@@ -24,7 +24,6 @@ excludes = [
     "IPython",
     "jedi",
     "pytest",
-    "unittest",
     "tkinter.test",
     "numpy.tests",
     "pandas.tests",
