@@ -38,10 +38,9 @@ work on a GitHub-hosted runner:
 5. Upload the dataset, out-of-fold predictions, validation report, and NumPy
    model artifact.
 
-The workflow runs automatically when relevant training code or regression data
-is pushed to the `work` branch. It can also be started manually from the Actions
-tab. The produced artifact is not automatically accepted into the application:
-the grouped validation report must be reviewed first.
+The workflow is started manually from the Actions tab. The produced artifact is
+not automatically accepted into the application: the grouped validation report
+must be reviewed first.
 
 ## Lightweight local smoke test
 

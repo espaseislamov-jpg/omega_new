@@ -2,17 +2,6 @@ name: Train neural quality judge
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - work
-    paths:
-      - ".github/workflows/train_quality_judge.yml"
-      - "data/regression/**"
-      - "omega_core/**"
-      - "omega_regression.py"
-      - "reference_targets_reverted_c22fixed.json"
-      - "scripts/export_quality_dataset.py"
-      - "scripts/train_quality_mlp.py"
 
 jobs:
   train:
