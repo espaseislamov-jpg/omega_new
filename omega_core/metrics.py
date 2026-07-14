@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 
 import numpy as np
 import pandas as pd
@@ -119,6 +120,16 @@ C20_EPA_MODEL_PARAMS = np.asarray([
 ], dtype=float)
 
 CLUSTER_QUALITY_COMPLETE_SCORE = 50.0
+
+# Conservative, reference-free warning envelope calibrated on every available
+# non-sealed manual batch.  It is intentionally tuned for recall: all known
+# abs(error) > 0.5 cases must be sent to manual review.  The sealed 14072026
+# batch was not used to select these limits.
+HIGH_ERROR_LEGACY_FRACTION_SPLIT = 0.0041
+HIGH_ERROR_DPA_RT_MAX = 9.2777
+HIGH_ERROR_C20_TARGET_RT_MIN = 7.7845
+HIGH_ERROR_EPA_RT_MAX = 8.4135
+HIGH_ERROR_C22_4_LEFT_WIDTH_MIN = 0.01746
 
 
 def compute_omega(matched_targets: pd.DataFrame) -> dict:
@@ -478,6 +489,158 @@ def compute_cluster_quality(matched_targets: pd.DataFrame) -> float:
     return float(score)
 
 
+def classify_high_error_risk(features: Mapping[str, object]) -> dict:
+    """Classify reference-free risk of an omega error above 0.5 percentage point.
+
+    This is deliberately a small, inspectable rule set rather than another
+    opaque score.  The numeric envelope was selected on the non-sealed manual
+    batches with a hard 100% recall constraint.
+    """
+
+    def finite(name: str) -> float:
+        try:
+            value = float(features.get(name, np.nan))
+        except (TypeError, ValueError):
+            return np.nan
+        return value if np.isfinite(value) else np.nan
+
+    score = 0
+    reason_codes: list[str] = []
+    reasons: list[str] = []
+    peak_codes: set[str] = set()
+
+    missing_key_peaks = [
+        str(code) for code in (features.get("missing_key_peaks", []) or []) if str(code)
+    ]
+    if missing_key_peaks:
+        score = max(score, 98)
+        reason_codes.append("missing_key_peak")
+        peak_codes.update(missing_key_peaks)
+        reasons.append(
+            f"Не найден важный пик: {', '.join(missing_key_peaks)}. "
+            "Результат нельзя выпускать без ручной проверки."
+        )
+
+    duplicate_codes = [
+        str(code) for code in (features.get("duplicate_peak_codes", []) or []) if str(code)
+    ]
+    if duplicate_codes:
+        score = max(score, 98)
+        reason_codes.append("duplicate_peak_assignment")
+        peak_codes.update(duplicate_codes)
+        reasons.append(
+            "Один участок сигнала назначен нескольким пикам. "
+            f"Проверьте: {', '.join(duplicate_codes)}."
+        )
+
+    legacy_fraction = finite("omega_c22_overlap_legacy_fraction")
+    dpa_rt = finite("C22_5_found_rt")
+    c20_target_rt = finite("C20_3N8_corrected_target_rt")
+    epa_rt = finite("C20_5_found_rt")
+    c22_4_left_width = finite("C22_4_left_width")
+
+    unstable_profile = bool(
+        np.all(np.isfinite([
+            legacy_fraction,
+            dpa_rt,
+            c20_target_rt,
+            epa_rt,
+        ]))
+        and legacy_fraction <= HIGH_ERROR_LEGACY_FRACTION_SPLIT
+        and dpa_rt <= HIGH_ERROR_DPA_RT_MAX
+        and c20_target_rt > HIGH_ERROR_C20_TARGET_RT_MIN
+        and epa_rt <= HIGH_ERROR_EPA_RT_MAX
+    )
+    if unstable_profile:
+        score = max(score, 88)
+        reason_codes.append("c20_c22_sensitive_profile")
+        peak_codes.update(["C20:5", "C22:5", "C22:4"])
+        reasons.append(
+            "Такое сочетание пиков C20 и C22 раньше давало ошибки больше 0,5. "
+            "Сверьте площади и обе границы C20:5, C22:5 и C22:4."
+        )
+
+    broad_shared_c22_tail = bool(
+        np.all(np.isfinite([legacy_fraction, c22_4_left_width]))
+        and legacy_fraction > HIGH_ERROR_LEGACY_FRACTION_SPLIT
+        and c22_4_left_width > HIGH_ERROR_C22_4_LEFT_WIDTH_MIN
+    )
+    if broad_shared_c22_tail:
+        score = max(score, 88)
+        reason_codes.append("broad_shared_c22_tail")
+        peak_codes.update(["C22:5", "C22:4"])
+        reasons.append(
+            "Левая граница C22:4 захватывает широкий общий хвост. "
+            "Сверьте площади и разделение C22:5/C22:4."
+        )
+
+    if score >= 95:
+        band = "HIGH_RISK_STRUCTURAL"
+    elif score >= 85:
+        band = "HIGH_RISK_GT_0_5"
+    else:
+        band = "LOW_RISK"
+    return {
+        "score": int(score),
+        "band": band,
+        "reason_codes": reason_codes,
+        "reasons": reasons,
+        "peak_codes": sorted(peak_codes),
+    }
+
+
+def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, object]) -> dict:
+    """Build production features and run the high-recall integration judge."""
+    if matched_targets is None or matched_targets.empty:
+        return classify_high_error_risk({"missing_key_peaks": ["C20:5", "C22:6", "C22:5"]})
+
+    valid = matched_targets.copy()
+    for column in [
+        "area",
+        "found_rt",
+        "corrected_target_rt",
+        "integration_start_x",
+        "integration_end_x",
+        "matched_peak_id",
+    ]:
+        valid[column] = (
+            pd.to_numeric(valid[column], errors="coerce")
+            if column in valid
+            else np.nan
+        )
+
+    def target_value(code: str, column: str) -> float:
+        row = valid.loc[valid["code"] == code, column]
+        if row.empty or not np.isfinite(row.iloc[0]):
+            return np.nan
+        return float(row.iloc[0])
+
+    missing_key_peaks = []
+    for code in ["C20:5", "C22:6", "C22:5"]:
+        area = target_value(code, "area")
+        if not np.isfinite(area) or area <= 0:
+            missing_key_peaks.append(code)
+
+    matched_ids = valid.dropna(subset=["matched_peak_id"])[["code", "matched_peak_id"]]
+    duplicate_mask = matched_ids["matched_peak_id"].duplicated(keep=False)
+    duplicate_codes = matched_ids.loc[duplicate_mask, "code"].astype(str).tolist()
+
+    c22_4_rt = target_value("C22:4", "found_rt")
+    c22_4_start = target_value("C22:4", "integration_start_x")
+    features = {
+        "missing_key_peaks": missing_key_peaks,
+        "duplicate_peak_codes": duplicate_codes,
+        "omega_c22_overlap_legacy_fraction": omega.get("c22_overlap_legacy_fraction", np.nan),
+        "C22_5_found_rt": target_value("C22:5", "found_rt"),
+        "C20_3N8_corrected_target_rt": target_value("C20:3N8", "corrected_target_rt"),
+        "C20_5_found_rt": target_value("C20:5", "found_rt"),
+        "C22_4_left_width": c22_4_rt - c22_4_start
+        if np.isfinite(c22_4_rt) and np.isfinite(c22_4_start)
+        else np.nan,
+    }
+    return classify_high_error_risk(features)
+
+
 def assess_confidence(
     matched_targets: pd.DataFrame,
     peaks: pd.DataFrame,
@@ -534,6 +697,17 @@ def assess_confidence(
             return ""
         value = row["status"].iloc[0]
         return "" if pd.isna(value) else str(value)
+
+    high_error_risk = assess_high_error_risk(valid, omega)
+    risk_reasons = list(high_error_risk.get("reasons", []))
+    if high_error_risk.get("score", 0) >= 95 and risk_reasons:
+        penalize(65.0, risk_reasons[0])
+        for reason in risk_reasons[1:]:
+            reason_items.append((0.0, reason))
+    elif high_error_risk.get("score", 0) >= 85 and risk_reasons:
+        penalize(46.0, risk_reasons[0])
+        for reason in risk_reasons[1:]:
+            reason_items.append((0.0, reason))
 
     omega_value = float(omega.get("omega3_trio", np.nan))
     strict_value = float(omega.get("omega3_trio_strict", np.nan))
@@ -645,6 +819,10 @@ def assess_confidence(
         penalize(5.0, "На хроматограмме много лишних пиков")
 
     score = max(0.0, min(100.0, score))
+    if high_error_risk.get("score", 0) >= 95:
+        score = min(score, 35.0)
+    elif high_error_risk.get("score", 0) >= 85:
+        score = min(score, 54.0)
     if score >= 85.0:
         level = "Геометрия OK"
     elif score >= 70.0:
@@ -677,9 +855,16 @@ def assess_confidence(
     result["score"] = score
     result["level"] = level
     result["label"] = level
-    result["button_text"] = f"Качество пиков: {int(round(score))}"
+    if high_error_risk.get("score", 0) >= 95:
+        result["button_text"] = "СТОП: проверить пики"
+    elif high_error_risk.get("score", 0) >= 85:
+        risky_codes = ", ".join(high_error_risk.get("peak_codes", []))
+        result["button_text"] = f"Проверить: {risky_codes or 'границы'}"
+    else:
+        result["button_text"] = f"Качество пиков: {int(round(score))}"
     result["reasons"] = reasons
     result["metrics"] = metrics
+    result["high_error_risk"] = high_error_risk
     return result
 
 

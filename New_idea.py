@@ -3882,7 +3882,7 @@ class ChromatogramApp:
             controls,
             textvariable=self.confidence_var,
             command=self.show_confidence_details,
-            width=25,
+            width=36,
         )
         self.confidence_button.pack(side="right")
         self.confidence_button.state(["disabled"])
@@ -3949,19 +3949,43 @@ class ChromatogramApp:
 
         table_frame = ttk.LabelFrame(sidebar, text="Пики", padding=(8, 8))
         table_frame.pack(fill="both", expand=True, pady=(10, 0))
-        cols = ["display_name", "code", "expected_rt", "found_rt", "area", "percent_area", "status"]
+        # Keep the values used for manual review in the visible part of the
+        # sidebar.  Area used to sit beyond the right edge of the table.
+        cols = ["display_name", "area", "percent_area", "code", "expected_rt", "found_rt", "status"]
         peaks_tree_frame = ttk.Frame(table_frame)
         peaks_tree_frame.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(peaks_tree_frame, columns=cols, show="headings", height=18)
+        headings = {
+            "display_name": "Пик",
+            "area": "Площадь",
+            "percent_area": "%",
+            "code": "Код",
+            "expected_rt": "RT ожид.",
+            "found_rt": "RT найден",
+            "status": "Комментарий",
+        }
+        widths = {
+            "display_name": 190,
+            "area": 105,
+            "percent_area": 58,
+            "code": 85,
+            "expected_rt": 82,
+            "found_rt": 82,
+            "status": 220,
+        }
         for c in cols:
-            self.tree.heading(c, text=c)
-            width = 118 if c not in {"display_name", "status"} else 160
+            self.tree.heading(c, text=headings[c])
+            width = widths[c]
             anchor = "w" if c in {"display_name", "status"} else "center"
             self.tree.column(c, width=width, anchor=anchor)
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.grid(row=0, column=0, sticky="nsew")
         peaks_scroll = ttk.Scrollbar(peaks_tree_frame, orient="vertical", command=self.tree.yview)
-        peaks_scroll.pack(side="right", fill="y")
-        self.tree.configure(yscrollcommand=peaks_scroll.set)
+        peaks_scroll.grid(row=0, column=1, sticky="ns")
+        peaks_scroll_x = ttk.Scrollbar(peaks_tree_frame, orient="horizontal", command=self.tree.xview)
+        peaks_scroll_x.grid(row=1, column=0, sticky="ew")
+        peaks_tree_frame.rowconfigure(0, weight=1)
+        peaks_tree_frame.columnconfigure(0, weight=1)
+        self.tree.configure(yscrollcommand=peaks_scroll.set, xscrollcommand=peaks_scroll_x.set)
         self.tree.bind("<<TreeviewSelect>>", self.handle_target_selection)
 
         manual_frame = ttk.LabelFrame(sidebar, text="Ручная интеграция", padding=(8, 8))
@@ -4014,9 +4038,16 @@ class ChromatogramApp:
             messagebox.showinfo("Качество пиков", "Нет данных для оценки геометрии пиков.", parent=self.root)
             return
 
+        risk = confidence.get("high_error_risk", {})
+        risk_score = risk.get("score", 0) if isinstance(risk, dict) else 0
+        if risk_score >= 95:
+            recommendation = "СТОП: результат нужно проверить вручную"
+        elif risk_score >= 85:
+            recommendation = "Нужна ручная проверка отмеченных пиков"
+        else:
+            recommendation = confidence.get("label", "—")
         lines = [
-            f"Оценка: {int(round(confidence['score']))}/100",
-            f"Рекомендация: {confidence.get('label', '—')}",
+            f"Рекомендация: {recommendation}",
             "",
         ]
         reasons = confidence.get("reasons") or []
@@ -4025,6 +4056,17 @@ class ChromatogramApp:
             lines.extend(reasons)
         else:
             lines.append("Заметных проблем не найдено.")
+
+        risky_codes = risk.get("peak_codes", []) if isinstance(risk, dict) else []
+        if risky_codes and not self.matched_targets_df.empty:
+            lines.extend(["", "Площади пиков для проверки:"])
+            for code in risky_codes:
+                target = self.matched_targets_df[self.matched_targets_df["code"] == code]
+                if target.empty:
+                    continue
+                area = pd.to_numeric(target["area"], errors="coerce").iloc[0]
+                area_text = f"{float(area):,.1f}".replace(",", " ") if np.isfinite(area) else "—"
+                lines.append(f"• {code}: {area_text}")
 
         messagebox.showinfo("Качество пиков", "\n".join(lines), parent=self.root)
 
@@ -4236,11 +4278,19 @@ class ChromatogramApp:
             confidence = batch.get("confidence") if isinstance(batch.get("confidence"), dict) else {}
             confidence_score = confidence.get("score", np.nan)
             confidence_label = confidence.get("label", "")
-            confidence_text = (
-                f"{int(round(confidence_score))}/100 {confidence_label}".strip()
-                if np.isfinite(confidence_score)
-                else ""
-            )
+            risk = confidence.get("high_error_risk", {}) if isinstance(confidence, dict) else {}
+            risk_score = risk.get("score", 0) if isinstance(risk, dict) else 0
+            if risk_score >= 95:
+                confidence_text = "СТОП — ручная проверка"
+            elif risk_score >= 85:
+                risky_codes = ", ".join(risk.get("peak_codes", []))
+                confidence_text = f"Проверить {risky_codes or 'границы'}"
+            else:
+                confidence_text = (
+                    f"{int(round(confidence_score))}/100 {confidence_label}".strip()
+                    if np.isfinite(confidence_score)
+                    else ""
+                )
             rows.append((index, batch.get("sample_name", f"Batch {index + 1}"), value_text, confidence_text))
         return rows
 
@@ -4322,7 +4372,7 @@ class ChromatogramApp:
 
         self.batch_results_window = tk.Toplevel(self.root)
         self.batch_results_window.title("Batch Results")
-        self.batch_results_window.geometry("560x520")
+        self.batch_results_window.geometry("680x520")
 
         frame = ttk.Frame(self.batch_results_window, padding=10)
         frame.pack(fill="both", expand=True)
@@ -4339,10 +4389,10 @@ class ChromatogramApp:
         self.batch_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18, selectmode="extended")
         self.batch_results_tree.heading("sample_name", text="Номер образца")
         self.batch_results_tree.heading("omega_value", text="Значение")
-        self.batch_results_tree.heading("confidence", text="Уверенность")
+        self.batch_results_tree.heading("confidence", text="Проверка")
         self.batch_results_tree.column("sample_name", width=300, anchor="w")
         self.batch_results_tree.column("omega_value", width=120, anchor="center")
-        self.batch_results_tree.column("confidence", width=140, anchor="center")
+        self.batch_results_tree.column("confidence", width=240, anchor="center")
         self.batch_results_tree.pack(side="left", fill="both", expand=True)
 
         scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.batch_results_tree.yview)
@@ -4795,16 +4845,24 @@ class ChromatogramApp:
         if self.matched_targets_df.empty:
             self.selected_target_code = None
             return
+        risk = (self.current_confidence or {}).get("high_error_risk", {})
+        risky_codes = set(risk.get("peak_codes", [])) if isinstance(risk, dict) else set()
         available_codes = set()
         for _, row in self.matched_targets_df.iterrows():
             code = str(row.get("code", ""))
             available_codes.add(code)
+            display_name = str(row.get("display_name", ""))
+            if code in risky_codes:
+                display_name = f"⚠ {display_name}"
+            area = pd.to_numeric(pd.Series([row.get("area")]), errors="coerce").iloc[0]
+            area_text = f"{float(area):,.1f}".replace(",", " ") if np.isfinite(area) else "—"
             vals = (
-                row.get("display_name", ""), row.get("code", ""),
+                display_name,
+                area_text,
+                "" if pd.isna(row.get("percent_area")) else f"{row['percent_area']:.2f}",
+                row.get("code", ""),
                 "" if pd.isna(row.get("expected_rt")) else f"{row['expected_rt']:.4f}",
                 "" if pd.isna(row.get("found_rt")) else f"{row['found_rt']:.4f}",
-                "" if pd.isna(row.get("area")) else f"{row['area']:.6f}",
-                "" if pd.isna(row.get("percent_area")) else f"{row['percent_area']:.2f}",
                 row.get("status", ""),
             )
             self.tree.insert("", "end", iid=code, values=vals)

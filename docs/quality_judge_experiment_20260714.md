@@ -1,13 +1,17 @@
 # Quality-judge experiment — 2026-07-14
 
-## Dataset
+## Data correction
 
-- 411 matched labeled chromatograms from 17 complete batch dates.
-- 152 samples with absolute error greater than 0.3.
-- 86 samples with absolute error greater than 0.5.
-- The greater-than-0.5 errors occur in only three batches: 8 in `02072026`,
-  64 in `03072026`, and 14 in `06072026`.
-- `14072026` remained sealed and was not exported, trained on, or evaluated.
+The original cloud dataset matched `03072026` by the printed sample ID. That is
+invalid for this acquisition: after an empty first injection, the 75 non-empty
+signals and the 76 workbook rows are offset by one. The resulting alternating
+manual/calculated pattern created 64 artificial `>0.5` labels and invalidates
+the neural-network metrics below as model-selection evidence.
+
+After matching `03072026` by acquisition position, the 411 evaluated
+chromatograms contain 32 real errors greater than 0.5: 8 in `02072026`, 10 in
+`03072026`, and 14 in `06072026`. `14072026` remained sealed and was not
+exported, trained on, or evaluated.
 
 ## Validation design
 
@@ -16,7 +20,7 @@ batches. The network therefore had to learn from the other two faulty dates and
 generalize to a completely unseen faulty date. This is stricter and more useful
 than a random sample split.
 
-## Results
+## Superseded neural results
 
 The small MLP using the final integration geometry achieved an aggregate ROC-AUC
 of 0.691 for errors greater than 0.5. At an operating point with 50% precision,
@@ -33,13 +37,14 @@ Adding disagreement across five baseline variants did not improve transfer:
   samples (76.4%) for review.
 
 Simple logistic regression, Extra Trees, and histogram gradient boosting were
-also checked with the same held-out batches and did not transfer better. This
-indicates a data/feature limitation rather than a need for a larger network.
+also checked with the same misaligned labels. These figures are retained only
+to explain why the neural model was not integrated; they must not be compared
+with future correctly aligned runs.
 
 ## Decision
 
-Do not integrate the trained model into the GUI. The current labeled set has
-enough individual errors but not enough independent error-bearing batches. A
-future experiment should add several new fully labeled dates containing both
-good and bad integrations, then rerun the existing cloud workflow without using
-the sealed `14072026` answers for feature design or model selection.
+Do not integrate the trained model into the GUI. The rule-based production judge
+was recalibrated on the corrected labels with a hard 100% recall constraint. A
+future neural experiment must first regenerate the dataset with the positional
+`03072026` mapping and must not use the sealed `14072026` answers for feature
+design or model selection.
