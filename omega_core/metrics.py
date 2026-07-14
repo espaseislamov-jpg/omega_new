@@ -872,12 +872,12 @@ def assess_confidence(
     result["level"] = level
     result["label"] = level
     if high_error_risk.get("score", 0) >= 95:
-        result["button_text"] = "СТОП: проверить пики"
+        result["button_text"] = "СТОП — переинтегрировать пики"
     elif high_error_risk.get("score", 0) >= 85:
         risky_codes = ", ".join(high_error_risk.get("peak_codes", []))
-        result["button_text"] = f"Проверить: {risky_codes or 'границы'}"
+        result["button_text"] = f"ПРОВЕРИТЬ — {risky_codes or 'границы'}"
     else:
-        result["button_text"] = f"Качество пиков: {int(round(score))}"
+        result["button_text"] = "ГОТОВО — ручная правка не нужна"
     result["reasons"] = reasons
     result["metrics"] = metrics
     result["high_error_risk"] = high_error_risk

@@ -47,8 +47,6 @@ FINAL_BOUNDARY_FALLBACK_MAX_CHANGED_PEAKS = 6
 FINAL_BOUNDARY_FALLBACK_MAX_AREA_RATIO = 1.080
 FINAL_BOUNDARY_FALLBACK_MAX_OMEGA_SHIFT = 0.100
 FINAL_BOUNDARY_FALLBACK_MAX_STRICT_SPREAD_INCREASE = 0.080
-FINAL_BOUNDARY_VALLEY_MAX_GAP = 0.008
-FINAL_BOUNDARY_VALLEY_MAX_AREA_RATIO = 1.05
 ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD", "0").strip() == "1"
 TARGET_RT_CORRIDOR_GUARD_CODES = {"C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0", "C20:4N6", "C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"}
 TARGET_RT_CORRIDOR_MIN_WIDTH = 0.004
@@ -1253,38 +1251,6 @@ def _find_signal_floor_boundary(
     return int(limit_idx)
 
 
-def _find_interpeak_valley_idx(
-    signal: np.ndarray,
-    left_apex_idx: int,
-    right_apex_idx: int,
-) -> int | None:
-    """Return the actual signal minimum between two neighboring apexes.
-
-    Midpoints between apexes are not chromatographic boundaries: for asymmetric
-    peaks they can lie on the rising slope of one component.  When several
-    samples share the minimum, prefer the one nearest the midpoint so a flat
-    baseline does not arbitrarily attach to either peak.
-    """
-    left = int(min(left_apex_idx, right_apex_idx))
-    right = int(max(left_apex_idx, right_apex_idx))
-    if right - left < 4:
-        return None
-    inner_start = left + 1
-    inner_end = right
-    segment = np.asarray(signal[inner_start:inner_end], dtype=float)
-    finite = np.isfinite(segment)
-    if not finite.any():
-        return None
-    finite_values = segment[finite]
-    minimum = float(np.min(finite_values))
-    tolerance = max(1e-12, abs(minimum) * 1e-7)
-    candidates = np.flatnonzero(finite & (segment <= minimum + tolerance)) + inner_start
-    if candidates.size == 0:
-        return None
-    midpoint = 0.5 * (left + right)
-    return int(candidates[np.argmin(np.abs(candidates - midpoint))])
-
-
 def _omega_strict_spread(omega: dict) -> float:
     final = float(omega.get("omega3_trio", np.nan))
     strict = float(omega.get("omega3_trio_strict", np.nan))
@@ -1395,11 +1361,6 @@ def expand_final_peak_boundaries(
     x = df[x_col].to_numpy(dtype=float)
     y_raw = df["y_corrected"].to_numpy(dtype=float)
     y = np.clip(y_raw, 0.0, None)
-    boundary_signal = (
-        df["y_smooth"].to_numpy(dtype=float)
-        if "y_smooth" in df
-        else y_raw
-    )
     if len(x) < 8 or not np.any(y > 0):
         return out
 
@@ -1433,13 +1394,7 @@ def expand_final_peak_boundaries(
 
         left_limit_x = rt - FINAL_BOUNDARY_MAX_EXTENSION
         right_limit_x = rt + FINAL_BOUNDARY_MAX_EXTENSION
-        left_valley_idx = None
-        right_valley_idx = None
-        left_valley_blocked = False
-        right_valley_blocked = False
         if pos > 0 and np.isfinite(ordered_rts[pos - 1]):
-            previous_apex_idx = int(np.argmin(np.abs(x - ordered_rts[pos - 1])))
-            left_valley_idx = _find_interpeak_valley_idx(boundary_signal, previous_apex_idx, apex_idx)
             left_limit_x = max(left_limit_x, 0.5 * (ordered_rts[pos - 1] + rt))
             current_status = str(row.get("status", ""))
             previous_status = str(work.loc[ordered_indices[pos - 1]].get("status", ""))
@@ -1449,11 +1404,7 @@ def expand_final_peak_boundaries(
                 ).iloc[0]
                 if np.isfinite(previous_end) and float(previous_end) <= rt:
                     left_limit_x = max(left_limit_x, float(previous_end))
-                    if left_valley_idx is not None and float(x[left_valley_idx]) < float(previous_end):
-                        left_valley_blocked = True
         if pos < len(ordered_rts) - 1 and np.isfinite(ordered_rts[pos + 1]):
-            next_apex_idx = int(np.argmin(np.abs(x - ordered_rts[pos + 1])))
-            right_valley_idx = _find_interpeak_valley_idx(boundary_signal, apex_idx, next_apex_idx)
             right_limit_x = min(right_limit_x, 0.5 * (rt + ordered_rts[pos + 1]))
             current_status = str(row.get("status", ""))
             next_status = str(work.loc[ordered_indices[pos + 1]].get("status", ""))
@@ -1463,8 +1414,6 @@ def expand_final_peak_boundaries(
                 ).iloc[0]
                 if np.isfinite(next_start) and float(next_start) >= rt:
                     right_limit_x = min(right_limit_x, float(next_start))
-                    if right_valley_idx is not None and float(x[right_valley_idx]) > float(next_start):
-                        right_valley_blocked = True
 
         left_limit_idx = int(np.searchsorted(x, left_limit_x, side="left"))
         right_limit_idx = int(np.searchsorted(x, right_limit_x, side="right") - 1)
@@ -1479,51 +1428,20 @@ def expand_final_peak_boundaries(
         apex_height = max(float(y[apex_idx]), float(np.nanmax(y[left_limit_idx:right_limit_idx + 1])), 1.0)
         threshold = max(local_noise * FINAL_BOUNDARY_THRESHOLD_SIGMA, apex_height * FINAL_BOUNDARY_THRESHOLD_FRACTION)
 
-        use_left_valley = bool(
-            left_valley_idx is not None
-            and not left_valley_blocked
-            and x[left_valley_idx] >= rt - FINAL_BOUNDARY_MAX_EXTENSION
-            and left_valley_idx < current_start_idx < apex_idx
-            and current_start - x[left_valley_idx] <= FINAL_BOUNDARY_VALLEY_MAX_GAP
-            and max(0.0, float(boundary_signal[left_valley_idx])) <= threshold
+        new_start_idx = _find_signal_floor_boundary(
+            signal=y,
+            start_idx=current_start_idx,
+            limit_idx=left_limit_idx,
+            direction=-1,
+            threshold=threshold,
         )
-        use_right_valley = bool(
-            right_valley_idx is not None
-            and not right_valley_blocked
-            and x[right_valley_idx] <= rt + FINAL_BOUNDARY_MAX_EXTENSION
-            and apex_idx < current_end_idx < right_valley_idx
-            and x[right_valley_idx] - current_end <= FINAL_BOUNDARY_VALLEY_MAX_GAP
-            and max(0.0, float(boundary_signal[right_valley_idx])) <= threshold
+        new_end_idx = _find_signal_floor_boundary(
+            signal=y,
+            start_idx=current_end_idx,
+            limit_idx=right_limit_idx,
+            direction=1,
+            threshold=threshold,
         )
-        new_start_idx = (
-            int(left_valley_idx)
-            if use_left_valley
-            else _find_signal_floor_boundary(
-                signal=y,
-                start_idx=current_start_idx,
-                limit_idx=left_limit_idx,
-                direction=-1,
-                threshold=threshold,
-            )
-        )
-        new_end_idx = (
-            int(right_valley_idx)
-            if use_right_valley
-            else _find_signal_floor_boundary(
-                signal=y,
-                start_idx=current_end_idx,
-                limit_idx=right_limit_idx,
-                direction=1,
-                threshold=threshold,
-            )
-        )
-        # A valley repair is one-sided: while extending the visibly truncated
-        # side, never let the ordinary floor search trim the opposite side.
-        # Preserve the legacy floor behavior when no valley repair is involved.
-        if use_left_valley:
-            new_end_idx = max(new_end_idx, current_end_idx)
-        if use_right_valley:
-            new_start_idx = min(new_start_idx, current_start_idx)
         if new_start_idx >= apex_idx or new_end_idx <= apex_idx or new_end_idx <= new_start_idx:
             continue
 
@@ -1536,8 +1454,6 @@ def expand_final_peak_boundaries(
             continue
         area_ratio = new_area / current_area
         if not (FINAL_BOUNDARY_MIN_AREA_RATIO <= area_ratio <= FINAL_BOUNDARY_MAX_AREA_RATIO):
-            continue
-        if (use_left_valley or use_right_valley) and area_ratio > FINAL_BOUNDARY_VALLEY_MAX_AREA_RATIO:
             continue
 
         if x[new_start_idx] >= current_start and x[new_end_idx] <= current_end:
@@ -1560,8 +1476,6 @@ def expand_final_peak_boundaries(
             "new_width": new_width,
             "width_ratio": new_width / max(float(current_end - current_start), 1e-9),
             "support_threshold": threshold,
-            "left_boundary_source": "interpeak_valley" if use_left_valley else "signal_floor",
-            "right_boundary_source": "interpeak_valley" if use_right_valley else "signal_floor",
         })
 
     if not candidate_rows:
