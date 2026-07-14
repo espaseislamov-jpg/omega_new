@@ -198,7 +198,7 @@ def predict(model: QualityMLP, values: np.ndarray, device: torch.device) -> np.n
     return prediction
 
 
-def choose_f2_threshold(labels: np.ndarray, probabilities: np.ndarray) -> float:
+def choose_review_threshold(labels: np.ndarray, probabilities: np.ndarray, minimum_precision: float = 0.50) -> float:
     if len(np.unique(labels)) < 2:
         return 0.5
     precision, recall, thresholds = precision_recall_curve(labels, probabilities)
@@ -206,7 +206,11 @@ def choose_f2_threshold(labels: np.ndarray, probabilities: np.ndarray) -> float:
         return 0.5
     precision = precision[:-1]
     recall = recall[:-1]
-    scores = 5.0 * precision * recall / np.maximum(4.0 * precision + recall, 1e-12)
+    acceptable = np.where(precision >= minimum_precision)[0]
+    if len(acceptable):
+        best = acceptable[np.argmax(recall[acceptable])]
+        return float(thresholds[int(best)])
+    scores = 2.0 * precision * recall / np.maximum(precision + recall, 1e-12)
     return float(thresholds[int(np.nanargmax(scores))])
 
 
@@ -223,11 +227,45 @@ def classification_metrics(labels: np.ndarray, probabilities: np.ndarray, thresh
         "f1": float(f1),
         "confusion_matrix": matrix.tolist(),
         "positives": int(np.sum(labels)),
+        "reviewed": int(np.sum(predicted)),
+        "review_fraction": float(np.mean(predicted)),
     }
     if len(np.unique(labels)) >= 2:
         result["roc_auc"] = float(roc_auc_score(labels, probabilities))
         result["average_precision"] = float(average_precision_score(labels, probabilities))
     return result
+
+
+def guarded_group_splits(groups: np.ndarray, high_error_labels: np.ndarray) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Hold out each error-bearing batch once when the dataset permits it.
+
+    A normal GroupKFold can put the few error-bearing batches in the same fold,
+    producing attractive aggregate metrics that mostly identify a batch. This
+    splitter forces the model to generalize from other faulty batches.
+    """
+    group_frame = pd.DataFrame({"group": groups, "high_error": high_error_labels})
+    summary = group_frame.groupby("group", sort=True).agg(rows=("group", "size"), positives=("high_error", "sum"))
+    positive_groups = summary.index[summary["positives"] > 0].astype(str).tolist()
+    if len(positive_groups) < 2:
+        splitter = GroupKFold(n_splits=min(5, len(summary)))
+        placeholder = np.zeros(len(groups), dtype=float)
+        return [(train_idx, valid_idx) for train_idx, valid_idx in splitter.split(placeholder, placeholder, groups)]
+
+    fold_groups: list[set[str]] = [{group} for group in positive_groups]
+    fold_sizes = [int(summary.loc[group, "rows"]) for group in positive_groups]
+    normal_groups = summary.index[summary["positives"] == 0].astype(str).tolist()
+    normal_groups.sort(key=lambda group: int(summary.loc[group, "rows"]), reverse=True)
+    for group in normal_groups:
+        fold_idx = int(np.argmin(fold_sizes))
+        fold_groups[fold_idx].add(group)
+        fold_sizes[fold_idx] += int(summary.loc[group, "rows"])
+
+    splits: list[tuple[np.ndarray, np.ndarray]] = []
+    group_strings = groups.astype(str)
+    for validation_groups in fold_groups:
+        valid_mask = np.isin(group_strings, list(validation_groups))
+        splits.append((np.flatnonzero(~valid_mask), np.flatnonzero(valid_mask)))
+    return splits
 
 
 def export_numpy_model(
@@ -263,7 +301,7 @@ def main() -> int:
 
     # Keep accidental local execution gentle; cloud GPU use is unaffected.
     torch.set_num_threads(min(2, max(1, torch.get_num_threads())))
-    frame = pd.read_csv(args.dataset)
+    frame = pd.read_csv(args.dataset, dtype={"batch_date": str, "raw_date": str})
     if frame.empty:
         raise SystemExit("Training dataset is empty")
     dates = set(frame["batch_date"].astype(str))
@@ -286,12 +324,12 @@ def main() -> int:
     ])
     groups = frame["batch_date"].astype(str).to_numpy()
 
-    splits = min(5, len(np.unique(groups)))
-    splitter = GroupKFold(n_splits=splits)
+    split_indices = guarded_group_splits(groups, y[:, 2].astype(int))
+    splits = len(split_indices)
     oof = np.full((len(frame), 3), np.nan, dtype=np.float64)
     best_epochs: list[int] = []
     fold_rows: list[dict] = []
-    for fold, (train_idx, valid_idx) in enumerate(splitter.split(raw_x, y[:, 2], groups), start=1):
+    for fold, (train_idx, valid_idx) in enumerate(split_indices, start=1):
         normalizer = FeatureNormalizer().fit(raw_x[train_idx])
         train_x = normalizer.transform(raw_x[train_idx])
         valid_x = normalizer.transform(raw_x[valid_idx])
@@ -318,8 +356,15 @@ def main() -> int:
 
     if not np.isfinite(oof).all():
         raise RuntimeError("OOF predictions are incomplete")
-    threshold_03 = choose_f2_threshold(y[:, 1].astype(int), oof[:, 1])
-    threshold_05 = choose_f2_threshold(y[:, 2].astype(int), oof[:, 2])
+    threshold_03 = choose_review_threshold(y[:, 1].astype(int), oof[:, 1])
+    threshold_05 = choose_review_threshold(y[:, 2].astype(int), oof[:, 2])
+    per_batch = []
+    for batch in sorted(set(groups)):
+        mask = groups == batch
+        batch_labels = y[mask, 2].astype(int)
+        batch_probabilities = oof[mask, 2]
+        batch_metrics = classification_metrics(batch_labels, batch_probabilities, threshold_05)
+        per_batch.append({"batch": str(batch), "rows": int(mask.sum()), **batch_metrics})
     report = {
         "rows": int(len(frame)),
         "batches": sorted(dates),
@@ -330,6 +375,7 @@ def main() -> int:
         "oof_expected_error_mae": float(mean_absolute_error(y[:, 0], oof[:, 0])),
         "oof_error_gt_0_3": classification_metrics(y[:, 1].astype(int), oof[:, 1], threshold_03),
         "oof_error_gt_0_5": classification_metrics(y[:, 2].astype(int), oof[:, 2], threshold_05),
+        "oof_error_gt_0_5_by_batch": per_batch,
     }
 
     final_epochs = max(20, int(np.median(best_epochs)))

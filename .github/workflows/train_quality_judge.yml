@@ -51,6 +51,13 @@ jobs:
             --output-dir artifacts/quality_judge \
             --device cpu
 
+      - name: Publish validation summary
+        run: |
+          echo "## Neural quality-judge validation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/quality_judge/quality_judge_report.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Upload dataset, predictions, and frozen model
         uses: actions/upload-artifact@v4
         with:

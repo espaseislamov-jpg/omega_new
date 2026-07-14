@@ -26,7 +26,9 @@ work on a GitHub-hosted runner:
 
 1. Recalculate every labeled chromatogram sequentially with the current engine.
 2. Export numeric peak geometry and integration-decision features.
-3. Perform five-fold validation with complete batch dates as groups.
+3. Hold out each error-bearing batch in turn, together with several normal
+   batches. This prevents an aggregate score from merely identifying one bad
+   date instead of learning transferable integration geometry.
 4. Train the final model on all non-sealed labeled batches.
 5. Upload the dataset, out-of-fold predictions, validation report, and NumPy
    model artifact.
