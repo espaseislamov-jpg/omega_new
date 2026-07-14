@@ -7,13 +7,13 @@ percentage point to manual review.
 ## Current validation set
 
 - 411 evaluated chromatograms from 17 non-sealed batch dates;
-- 32 errors above 0.5 after correcting the `03072026` acquisition mapping;
+- 35 errors above 0.5 with the current integration engine;
 - `14072026` remains sealed and was not used for thresholds or validation.
 
 ## Rules
 
 Structural failures (missing key peaks or one signal assigned to several peaks)
-produce a stop warning. Two conservative C20/C22 geometry envelopes produce a
+produce a stop warning. Three conservative C20/C22 geometry envelopes produce a
 manual-review warning. They use only peak positions, widths, asymmetry, and the
 existing C22 overlap state available in the GUI. The user-facing message names
 the peaks to inspect; numeric thresholds stay in `omega_core/metrics.py`.
@@ -23,9 +23,9 @@ does not create a high-error warning.
 
 ## Measured behavior
 
-On the corrected historical set, the high-risk bands catch 32/32 known errors
-above 0.5. They mark 97/411 samples for review, including 65/379 samples that are
-inside the tolerance band (17.2% of normal samples). This false-warning rate is
+On the corrected historical set, the high-risk bands catch 35/35 known errors
+above 0.5. They mark 106/411 samples for review, including 71/376 samples that are
+inside the tolerance band (18.9% of normal samples). This false-warning rate is
 the deliberate cost of the requested 100% historical recall.
 
 This is a measured historical result, not a mathematical guarantee for unseen

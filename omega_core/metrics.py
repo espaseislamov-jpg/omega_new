@@ -128,7 +128,8 @@ CLUSTER_QUALITY_COMPLETE_SCORE = 50.0
 HIGH_ERROR_LEGACY_FRACTION_SPLIT = 0.0041
 HIGH_ERROR_DPA_RT_MAX = 9.2777
 HIGH_ERROR_C20_TARGET_RT_MIN = 7.7845
-HIGH_ERROR_EPA_RT_MAX = 8.4135
+HIGH_ERROR_EPA_RT_MAX = 8.4140
+HIGH_ERROR_EARLY_C20_TARGET_RT_MAX = 7.7795
 HIGH_ERROR_C22_4_LEFT_WIDTH_MIN = 0.01746
 
 
@@ -560,6 +561,19 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
             "Сверьте площади и обе границы C20:5, C22:5 и C22:4."
         )
 
+    early_retention_profile = bool(
+        np.isfinite(c20_target_rt)
+        and c20_target_rt <= HIGH_ERROR_EARLY_C20_TARGET_RT_MAX
+    )
+    if early_retention_profile:
+        score = max(score, 88)
+        reason_codes.append("early_retention_profile")
+        peak_codes.update(["C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"])
+        reasons.append(
+            "Пики вышли заметно раньше обычного, поэтому автоматические границы менее надёжны. "
+            "Сверьте площади и границы пиков C20 и C22."
+        )
+
     broad_shared_c22_tail = bool(
         np.all(np.isfinite([legacy_fraction, c22_4_left_width]))
         and legacy_fraction > HIGH_ERROR_LEGACY_FRACTION_SPLIT
@@ -701,11 +715,11 @@ def assess_confidence(
     high_error_risk = assess_high_error_risk(valid, omega)
     risk_reasons = list(high_error_risk.get("reasons", []))
     if high_error_risk.get("score", 0) >= 95 and risk_reasons:
-        penalize(65.0, risk_reasons[0])
+        reason_items.append((65.0, risk_reasons[0]))
         for reason in risk_reasons[1:]:
             reason_items.append((0.0, reason))
     elif high_error_risk.get("score", 0) >= 85 and risk_reasons:
-        penalize(46.0, risk_reasons[0])
+        reason_items.append((46.0, risk_reasons[0]))
         for reason in risk_reasons[1:]:
             reason_items.append((0.0, reason))
 
@@ -818,7 +832,8 @@ def assess_confidence(
     if peak_count >= 65:
         penalize(5.0, "На хроматограмме много лишних пиков")
 
-    score = max(0.0, min(100.0, score))
+    geometry_score = max(0.0, min(100.0, score))
+    score = geometry_score
     if high_error_risk.get("score", 0) >= 95:
         score = min(score, 35.0)
     elif high_error_risk.get("score", 0) >= 85:
@@ -853,6 +868,7 @@ def assess_confidence(
     metrics.append(f"C22 коррекции: credit area {c22_credit:.1f}; debit {c22_debit:.2f} п.п.")
 
     result["score"] = score
+    result["geometry_score"] = geometry_score
     result["level"] = level
     result["label"] = level
     if high_error_risk.get("score", 0) >= 95:

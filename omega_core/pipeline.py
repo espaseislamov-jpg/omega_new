@@ -180,7 +180,10 @@ def _confidence_score(result: dict) -> float:
     confidence = result.get("confidence", {})
     if not isinstance(confidence, dict):
         return np.nan
-    return float(confidence.get("score", np.nan))
+    # The high-recall production judge may lower the displayed score to force a
+    # review, but it must never change baseline/model selection and therefore
+    # must never change the reported omega value.
+    return float(confidence.get("geometry_score", confidence.get("score", np.nan)))
 
 
 def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
