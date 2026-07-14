@@ -117,7 +117,7 @@ def _is_low_ratio_narrow_dha_shape(result: dict) -> bool:
     dpa_area = _target_area(matched_targets, "C22:5")
     c22_4_area = _target_area(matched_targets, "C22:4")
     strict_value = float(result.get("omega", {}).get("omega3_trio_strict", np.nan))
-    return bool(
+    high_omega_low_ratio = bool(
         np.all(np.isfinite([dha_width, c22_4_width, dpa_area, c22_4_area, strict_value]))
         and c22_4_area > 0
         and dha_width <= 0.030
@@ -125,6 +125,15 @@ def _is_low_ratio_narrow_dha_shape(result: dict) -> bool:
         and 0.35 <= dpa_area / c22_4_area <= 0.60
         and strict_value >= 6.0
     )
+    mid_omega_balanced_ratio = bool(
+        np.all(np.isfinite([dha_width, c22_4_width, dpa_area, c22_4_area, strict_value]))
+        and c22_4_area > 0
+        and dha_width <= 0.026
+        and c22_4_width >= 0.045
+        and 0.49 <= dpa_area / c22_4_area <= 0.55
+        and 4.5 <= strict_value <= 5.2
+    )
+    return high_omega_low_ratio or mid_omega_balanced_ratio
 
 
 def _should_try_asls_shape_fallback(result: dict) -> bool:
@@ -185,6 +194,9 @@ def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
     candidate_confidence = _confidence_score(candidate)
     current_omega = float(current.get("omega_report", np.nan))
     candidate_omega = float(candidate.get("omega_report", np.nan))
+    candidate_omega_data = candidate.get("omega", {})
+    candidate_c22_ratio = float(candidate_omega_data.get("c22_reference_ratio", np.nan))
+    candidate_c22_debit = float(candidate_omega_data.get("c22_overintegration_debit_points", 0.0))
 
     if not (np.isfinite(current_width) and np.isfinite(candidate_width)):
         return False
@@ -192,6 +204,25 @@ def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
         np.isfinite(current_omega)
         and np.isfinite(candidate_omega)
         and abs(candidate_omega - current_omega) > 0.45
+    ):
+        allow_high_omega_c22_downshift = bool(
+            current_omega >= 9.0
+            and candidate_omega < current_omega
+            and current_omega - candidate_omega <= 1.10
+            and np.isfinite(candidate_c22_ratio)
+            and 1.35 <= candidate_c22_ratio <= 1.90
+            and candidate_c22_debit > 0
+        )
+        if not allow_high_omega_c22_downshift:
+            return False
+    if (
+        np.isfinite(current_omega)
+        and np.isfinite(candidate_omega)
+        and candidate_omega < current_omega
+        and current_omega < 8.0
+        and np.isfinite(candidate_c22_ratio)
+        and candidate_c22_ratio >= 1.50
+        and candidate_c22_debit > 0
     ):
         return False
     if candidate_width > current_width + 0.002 and not _is_low_ratio_narrow_dha_shape(current):

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from omega_path_compat import configure_windows_path_compat
+from omega_batch_order import sort_batches_by_acquisition
 
 configure_windows_path_compat()
 
@@ -162,14 +163,6 @@ def robust_sigma(values: np.ndarray) -> float:
     return sigma
 
 
-def omega_sample_sort_key(name: str) -> tuple[int, int | str, str]:
-    text = name or ""
-    match = re.search(r"\bO(\d+)\b", text) or re.search(r"\bO(\d+)", text)
-    if match:
-        return (0, int(match.group(1)), text)
-    return (1, text, text)
-
-
 def load_reference_targets(reference_path: Path = DEFAULT_REFERENCE_PATH) -> pd.DataFrame:
     with Path(reference_path).open("r", encoding="utf-8") as handle:
         raw_targets = json.load(handle)
@@ -258,6 +251,9 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float) -> list[dict[s
         batches.append({
             "sample_name": sample_name,
             "file_name": file_name,
+            "signal_name": current_meta.get("signal_name", ""),
+            "acquired_at": current_meta.get("acquired_at", ""),
+            "source_path": current_meta.get("source_path", ""),
             "dataframe": chrom_df,
         })
         current_meta = None
@@ -270,11 +266,13 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float) -> list[dict[s
                 continue
             if line.startswith('"Path","File","Date Acquired"'):
                 flush_current()
-                current_meta = {"file_name": "", "signal_name": ""}
+                current_meta = {"source_path": "", "file_name": "", "acquired_at": "", "signal_name": ""}
                 continue
             if current_meta is not None and not current_meta["file_name"] and line.startswith('"'):
                 parsed = next(csv.reader([line]))
+                current_meta["source_path"] = parsed[0] if len(parsed) > 0 else ""
                 current_meta["file_name"] = parsed[1] if len(parsed) > 1 else ""
+                current_meta["acquired_at"] = parsed[2] if len(parsed) > 2 else ""
                 continue
             if current_meta is not None and line.startswith('"Signal: '):
                 current_meta["signal_name"] = line.strip('"')
@@ -292,7 +290,7 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float) -> list[dict[s
     flush_current()
     if not batches:
         raise ValueError(f"No batches parsed from {file_path}")
-    return sorted(batches, key=lambda item: omega_sample_sort_key(item["sample_name"]))
+    return sort_batches_by_acquisition(batches)
 
 
 def load_batches(file_path: Path, cutoff_minutes: float = DEFAULT_CUTOFF_MINUTES) -> list[dict[str, Any]]:

@@ -179,6 +179,8 @@ def _select_ordered_cluster_peaks(
     target_apexes,
     max_distances,
     min_apex_gaps=None,
+    allow_common_shift: bool = False,
+    max_common_shift: float = 0.0,
 ):
     if candidates_df is None or candidates_df.empty:
         return None
@@ -192,7 +194,16 @@ def _select_ordered_cluster_peaks(
     best_choice = None
     for combo in itertools.combinations(range(len(candidates)), len(target_apexes)):
         chosen = candidates.iloc[list(combo)].copy().reset_index(drop=True)
-        distances = [abs(float(chosen.iloc[i]["apex_x"]) - target_apexes[i]) for i in range(len(target_apexes))]
+        observed_apexes = chosen["apex_x"].to_numpy(dtype=float)
+        common_shift = 0.0
+        if allow_common_shift:
+            common_shift = float(np.median(observed_apexes - np.asarray(target_apexes, dtype=float)))
+            if abs(common_shift) > float(max_common_shift):
+                continue
+        distances = [
+            abs(float(observed_apexes[i]) - (target_apexes[i] + common_shift))
+            for i in range(len(target_apexes))
+        ]
         if any(distance > max_distances[i] for i, distance in enumerate(distances)):
             continue
         if min_apex_gaps is not None:
@@ -202,6 +213,7 @@ def _select_ordered_cluster_peaks(
                 continue
         score = (
             float(sum(distances))
+            + 0.10 * abs(common_shift)
             - 1e-6 * float(chosen["prominence"].sum())
             - 1e-7 * float(chosen["area"].sum())
         )
@@ -247,6 +259,8 @@ def _assign_local_geometry_to_row(out: pd.DataFrame, row_idx: int, geom: pd.Seri
 
 def _assign_local_geometry_bounds_to_row(out: pd.DataFrame, row_idx: int, geom: pd.Series, status: str) -> None:
     out.at[row_idx, "found_rt"] = float(geom["apex_x"])
+    out.at[row_idx, "area"] = float(geom["area"])
+    out.at[row_idx, "percent_area"] = np.nan
     out.at[row_idx, "integration_start_x"] = float(geom["start_x"])
     out.at[row_idx, "integration_end_x"] = float(geom["end_x"])
     out.at[row_idx, "status"] = status
@@ -900,6 +914,8 @@ def refine_c18_c20_cluster_matches(
             c18_candidates,
             target_apexes=[7.593, 7.623, 7.650, 7.750],
             max_distances=[0.022, 0.022, 0.025, 0.028],
+            allow_common_shift=True,
+            max_common_shift=0.035,
         )
     if c18_choice is not None:
         peaks_lookup = peaks_out.copy()
@@ -932,6 +948,43 @@ def refine_c18_c20_cluster_matches(
                 peak_match = peaks_lookup[(peaks_lookup["apex_x"] - float(geom["apex_x"])).abs() <= 0.006]
                 if not peak_match.empty:
                     out.at[row_idx_int, "matched_peak_id"] = int(peak_match.sort_values("area", ascending=False).iloc[0]["peak_id"])
+
+    # If the C18:1 peak is unresolved, do not duplicate the only local peak ID.
+    # Preserve denominator mass with a transparent estimate from the two large
+    # neighbouring C18 components.  The row remains unmatched and therefore is
+    # still surfaced for manual review by the quality judge.
+    c18_1_rows = out.index[out["code"] == "C18:1N9C"].tolist()
+    if c18_1_rows:
+        c18_1_idx = int(c18_1_rows[0])
+        c18_1_area = pd.to_numeric(pd.Series([out.at[c18_1_idx, "area"]]), errors="coerce").iloc[0]
+
+        def c18_value(code: str, column: str) -> float:
+            rows = out.index[out["code"] == code].tolist()
+            if not rows:
+                return np.nan
+            return pd.to_numeric(pd.Series([out.at[int(rows[0]), column]]), errors="coerce").iloc[0]
+
+        c18_2_area = c18_value("C18:2N6C", "area")
+        c18_3_area = c18_value("C18:3N3", "area")
+        c18_0_area = c18_value("C18:0", "area")
+        c18_3_rt = c18_value("C18:3N3", "found_rt")
+        if (
+            not np.isfinite(c18_1_area)
+            and np.all(np.isfinite([c18_2_area, c18_3_area, c18_0_area, c18_3_rt]))
+            and c18_2_area > 0
+            and c18_0_area > 0
+            and c18_3_area > 0
+            and 7.60 <= c18_3_rt <= 7.69
+            and c18_3_area < 0.20 * min(c18_2_area, c18_0_area)
+        ):
+            estimated_area = float(np.sqrt(c18_2_area * c18_0_area))
+            out.at[c18_1_idx, "area"] = estimated_area
+            out.at[c18_1_idx, "found_rt"] = np.nan
+            out.at[c18_1_idx, "integration_start_x"] = np.nan
+            out.at[c18_1_idx, "integration_end_x"] = np.nan
+            out.at[c18_1_idx, "matched_peak_id"] = np.nan
+            out.at[c18_1_idx, "match_score"] = np.nan
+            out.at[c18_1_idx, "status"] = "estimated_c18_1_unresolved"
 
     c20_codes = ["C20:4N6", "C20:5", "C20:3N8"]
     c20_candidates = _collect_local_cluster_peak_geometries(
@@ -1253,6 +1306,9 @@ def _judge_final_boundary_candidate(
         details["omega_shift"] = float(omega_shift)
         if abs(omega_shift) > FINAL_BOUNDARY_MAX_OMEGA_SHIFT:
             return False, "omega_shift_too_large", details
+        anchor_coefficient = rt_profile.estimate_anchor_coefficient(current)
+        if anchor_coefficient >= 0.9999 and changed_count >= 5 and abs(omega_shift) > 0.20:
+            return False, "collective_boundary_shift_too_large", details
 
     current_spread = _omega_strict_spread(current_omega)
     candidate_spread = _omega_strict_spread(candidate_omega)
@@ -1340,8 +1396,24 @@ def expand_final_peak_boundaries(
         right_limit_x = rt + FINAL_BOUNDARY_MAX_EXTENSION
         if pos > 0 and np.isfinite(ordered_rts[pos - 1]):
             left_limit_x = max(left_limit_x, 0.5 * (ordered_rts[pos - 1] + rt))
+            current_status = str(row.get("status", ""))
+            previous_status = str(work.loc[ordered_indices[pos - 1]].get("status", ""))
+            if "recovered_c22_local_unresolved" in current_status or "recovered_c22_local_unresolved" in previous_status:
+                previous_end = pd.to_numeric(
+                    pd.Series([work.loc[ordered_indices[pos - 1], "integration_end_x"]]), errors="coerce"
+                ).iloc[0]
+                if np.isfinite(previous_end) and float(previous_end) <= rt:
+                    left_limit_x = max(left_limit_x, float(previous_end))
         if pos < len(ordered_rts) - 1 and np.isfinite(ordered_rts[pos + 1]):
             right_limit_x = min(right_limit_x, 0.5 * (rt + ordered_rts[pos + 1]))
+            current_status = str(row.get("status", ""))
+            next_status = str(work.loc[ordered_indices[pos + 1]].get("status", ""))
+            if "recovered_c22_local_unresolved" in current_status or "recovered_c22_local_unresolved" in next_status:
+                next_start = pd.to_numeric(
+                    pd.Series([work.loc[ordered_indices[pos + 1], "integration_start_x"]]), errors="coerce"
+                ).iloc[0]
+                if np.isfinite(next_start) and float(next_start) >= rt:
+                    right_limit_x = min(right_limit_x, float(next_start))
 
         left_limit_idx = int(np.searchsorted(x, left_limit_x, side="left"))
         right_limit_idx = int(np.searchsorted(x, right_limit_x, side="right") - 1)
@@ -1628,6 +1700,114 @@ def tighten_dpa_overintegration_by_local_bounds(
     out.at[dpa_idx, "status"] = _append_status_suffix(out.at[dpa_idx, "status"], "dpatight")
     return _recompute_matched_percent_area(out)
 
+def recover_single_missing_c22_by_local_bounds(
+    df: pd.DataFrame,
+    matched_targets: pd.DataFrame,
+) -> pd.DataFrame:
+    """Integrate one unresolved C22 component between trustworthy neighbours."""
+    out = matched_targets.copy()
+    if df is None or df.empty or out is None or out.empty:
+        return out
+
+    c22_codes = ["C22:6", "C22:5", "C22:4"]
+    nominal_centers = {"C22:6": 9.252, "C22:5": 9.285, "C22:4": 9.316}
+    cluster = out[out["code"].isin(c22_codes)].copy()
+    if len(cluster) != len(c22_codes):
+        return out
+    for column in ["area", "found_rt", "integration_start_x", "integration_end_x"]:
+        cluster[column] = pd.to_numeric(cluster[column], errors="coerce")
+    missing_codes = cluster.loc[cluster["area"].isna(), "code"].astype(str).tolist()
+    if len(missing_codes) != 1 or int(cluster["area"].notna().sum()) != 2:
+        return out
+
+    missing_code = missing_codes[0]
+    # Only the middle DPA component has two trustworthy valley boundaries.
+    # Recovering an outer component would require inventing one outer boundary
+    # and can absorb an unrelated shoulder.
+    if missing_code != "C22:5":
+        return out
+    missing_pos = c22_codes.index(missing_code)
+    found = cluster.dropna(subset=["area", "found_rt", "integration_start_x", "integration_end_x"])
+    if len(found) != 2:
+        return out
+    observed_shifts = [
+        float(row["found_rt"]) - nominal_centers[str(row["code"])]
+        for _, row in found.iterrows()
+    ]
+    predicted_rt = float(nominal_centers[missing_code] + np.median(observed_shifts))
+
+    x_col = _get_x_column_name(df)
+    x = df[x_col].to_numpy(dtype=float)
+    y_raw = df["y_corrected"].to_numpy(dtype=float)
+    y_smooth = np.clip(df["y_smooth"].to_numpy(dtype=float), 0.0, None)
+    y = np.clip(y_raw, 0.0, None)
+    if len(x) < 8:
+        return out
+
+    if missing_pos > 0:
+        left_row = cluster[cluster["code"] == c22_codes[missing_pos - 1]].iloc[0]
+        left_x = float(left_row["integration_end_x"])
+    else:
+        left_x = predicted_rt - 0.030
+    if missing_pos < len(c22_codes) - 1:
+        right_row = cluster[cluster["code"] == c22_codes[missing_pos + 1]].iloc[0]
+        right_x = float(right_row["integration_start_x"])
+    else:
+        right_x = predicted_rt + 0.030
+
+    left_idx = int(np.searchsorted(x, left_x, side="left"))
+    right_idx = int(np.searchsorted(x, right_x, side="right") - 1)
+    left_idx = max(0, min(left_idx, len(x) - 2))
+    right_idx = max(left_idx + 1, min(right_idx, len(x) - 1))
+    width = float(x[right_idx] - x[left_idx])
+    if not (0.012 <= width <= 0.065 and x[left_idx] < predicted_rt < x[right_idx]):
+        return out
+
+    search_left = int(np.searchsorted(x, predicted_rt - 0.012, side="left"))
+    search_right = int(np.searchsorted(x, predicted_rt + 0.012, side="right") - 1)
+    search_left = max(left_idx + 1, min(search_left, right_idx - 1))
+    search_right = max(search_left, min(search_right, right_idx - 1))
+    apex_idx = int(search_left + np.argmax(y_smooth[search_left:search_right + 1]))
+    if apex_idx <= left_idx or apex_idx >= right_idx:
+        return out
+
+    edge_floor = max(float(y_smooth[left_idx]), float(y_smooth[right_idx]), 0.0)
+    apex_height = float(y_smooth[apex_idx] - edge_floor)
+    # Estimate noise from the high-frequency residual; using the whole interval
+    # would mistake the unresolved peak itself for noise and reject it.
+    residual = y_raw[left_idx:right_idx + 1] - y_smooth[left_idx:right_idx + 1]
+    local_noise = max(_robust_sigma(residual), 1.0)
+    if apex_height < max(3.0 * local_noise, 25.0):
+        return out
+    area = float(np.trapezoid(y[left_idx:right_idx + 1], x[left_idx:right_idx + 1]))
+    if not np.isfinite(area) or area <= 5.0:
+        return out
+
+    row_idx = int(out.index[out["code"] == missing_code][0])
+    out.at[row_idx, "found_rt"] = float(x[apex_idx])
+    out.at[row_idx, "area"] = area
+    out.at[row_idx, "integration_start_x"] = float(x[left_idx])
+    out.at[row_idx, "integration_end_x"] = float(x[right_idx])
+    out.at[row_idx, "matched_peak_id"] = np.nan
+    out.at[row_idx, "match_score"] = abs(float(x[apex_idx]) - predicted_rt)
+    out.at[row_idx, "status"] = "recovered_c22_local_unresolved"
+    decision = {
+        "judge": "missing_c22_local_recovery",
+        "candidate": "local_gap_integration",
+        "code": missing_code,
+        "decision": "accepted",
+        "reason": "resolved_signal_inside_expected_c22_gap",
+        "new_start_x": float(x[left_idx]),
+        "new_end_x": float(x[right_idx]),
+        "new_area": area,
+        "predicted_rt": predicted_rt,
+        "found_rt": float(x[apex_idx]),
+        "apex_height": apex_height,
+        "local_noise": local_noise,
+    }
+    return _with_judge_decisions(_recompute_matched_percent_area(out), [decision])
+
+
 def refine_cluster_matches(
     processed: pd.DataFrame,
     peaks: pd.DataFrame,
@@ -1636,6 +1816,7 @@ def refine_cluster_matches(
     peaks, matched_targets = refine_c18_c20_cluster_matches(processed, peaks, matched_targets)
     matched_targets = refine_overlapped_c22_cluster_areas(processed, peaks, matched_targets)
     matched_targets = refine_cluster_areas_by_local_valleys(processed, matched_targets)
+    matched_targets = recover_single_missing_c22_by_local_bounds(processed, matched_targets)
     matched_targets = legacy_fit.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
     matched_targets = legacy_fit.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
     matched_targets = legacy_fit.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)

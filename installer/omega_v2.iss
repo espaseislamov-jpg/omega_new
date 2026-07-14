@@ -8,16 +8,18 @@ AppId={{8F342910-9F62-46E8-88D6-0A3E2C0B2002}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={autopf}\Omega v2
+DefaultDirName={localappdata}\Programs\Omega v2
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
+PrivilegesRequired=lowest
 OutputDir=..\installer_output
 OutputBaseFilename=omega_v2_setup
-Compression=lzma
+Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesAllowed=x64
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"

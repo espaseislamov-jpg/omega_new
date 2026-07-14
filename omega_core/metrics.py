@@ -22,6 +22,12 @@ C22_OVERLAP_WIDE_CLUSTER_SCALE = 0.65
 C22_DPA_OVERINTEGRATION_RATIO_MIN = 1.35
 C22_DPA_OVERINTEGRATION_DPA_FRACTION = 0.30
 C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS = 0.45
+# The narrow-DPA/broad-C22:4 shape is a reliable resolved-cluster guard only
+# inside the RT profile on which it was validated.  A later high-anchor profile
+# has the same apparent widths but systematically over-assigns the shared tail
+# to DPA, so it must retain the bounded over-integration debit.
+C22_RESOLVED_PROFILE_ANCHOR_MIN = 0.9999
+C22_RESOLVED_PROFILE_ANCHOR_MAX = 1.00065
 # Bounded C22 width-balance calibration learned from regression diagnostics.
 # It nudges narrow DPA/C22:4 cluster cases by at most a few tenths of an omega point.
 C22_WIDTH_BALANCE_DPA_WIDTH_MAX = 0.030
@@ -268,6 +274,26 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         epa_extra_scale *= C20_EPA_UNDERFIT_EXTRA_SCALE
         epa_credit_area *= C20_EPA_UNDERFIT_EXTRA_SCALE
 
+    # Keep the fitted-EPA correction monotonic at the two well-separated ends.
+    # An extremely small fitted EPA is a genuine unresolved shoulder, while a
+    # moderate EPA/C20:3 ratio does not need an additional overlap credit.
+    if "matched_c20_fit" in status_of("C20:5") and np.isfinite(epa_to_c20_3_ratio):
+        if (
+            epa_to_c20_3_ratio <= 0.10
+            and np.isfinite(c20_width_epa)
+            and np.isfinite(c20_width_neighbor)
+            and c20_width_epa <= 0.025
+            and c20_width_neighbor >= 2.0 * c20_width_epa
+        ):
+            epa_credit_area = max(epa_credit_area, 0.65 * c20_3)
+            epa_overlap_fraction = epa_credit_area / c20_3 if c20_3 > 0 else 0.0
+            epa_model_applied = True
+        elif epa_to_c20_3_ratio >= 0.18:
+            epa_credit_area = 0.0
+            epa_overlap_fraction = 0.0
+            epa_model_applied = False
+            epa_extra_scale = 1.0
+
     c22_ratio = dpa / c22_4 if c22_4 > 0 else np.nan
     c22_width_values = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
     c22_missing_dha_coelution = bool(
@@ -343,12 +369,22 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     c22_debit_area = 0.0
     c22_debit_points = 0.0
     c22_debit_applied = False
+    w_dha, w_dpa, w_c22_4 = c22_width_values
+    resolved_broad_c22_reference = bool(
+        np.all(np.isfinite([w_dpa, w_c22_4]))
+        and np.isfinite(anchor_coefficient)
+        and C22_RESOLVED_PROFILE_ANCHOR_MIN <= anchor_coefficient <= C22_RESOLVED_PROFILE_ANCHOR_MAX
+        and w_dpa <= 0.030
+        and w_c22_4 >= 0.035
+        and w_c22_4 >= w_dpa + 0.009
+    )
     if (
         c22_4 > 0
         and dpa > 0
         and np.isfinite(c22_ratio)
         and c22_ratio > C22_DPA_OVERINTEGRATION_RATIO_MIN
         and not c22_missing_dha_coelution
+        and not resolved_broad_c22_reference
     ):
         max_debit_area = effective_total_area * C22_DPA_OVERINTEGRATION_MAX_OMEGA_POINTS / 100.0
         c22_debit_area = float(np.clip(
@@ -361,7 +397,6 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
 
     c22_width_balance_points = 0.0
     c22_width_balance_applied = False
-    w_dha, w_dpa, w_c22_4 = c22_width_values
     if np.all(np.isfinite([w_dha, w_dpa, w_c22_4])) and w_dpa <= C22_WIDTH_BALANCE_DPA_WIDTH_MAX:
         if w_c22_4 <= C22_WIDTH_BALANCE_C22_4_NARROW_MAX:
             if w_dha <= C22_WIDTH_BALANCE_DHA_WIDTH_MAX:
@@ -505,11 +540,11 @@ def assess_confidence(
     spread = abs(omega_value - strict_value) if np.isfinite(omega_value) and np.isfinite(strict_value) else np.nan
 
     if baseline_mode != "chebyshev":
-        penalize(4.0, f"Использован резервный baseline ({baseline_mode})")
+        penalize(4.0, "Фон сигнала оказался сложным — проверьте границы пиков")
 
     if cluster_quality_score is not None and np.isfinite(cluster_quality_score) and cluster_quality_score < CLUSTER_QUALITY_COMPLETE_SCORE:
         gap = float(CLUSTER_QUALITY_COMPLETE_SCORE - cluster_quality_score)
-        penalize(min(18.0, 6.0 + gap * 0.45), f"Качество кластеров ниже целевого ({cluster_quality_score:.1f})")
+        penalize(min(18.0, 6.0 + gap * 0.45), "Не все группы пиков распознаны уверенно")
 
     matched_count = int(valid["matched_peak_id"].notna().sum())
     matched_ids = valid.dropna(subset=["matched_peak_id"])[["code", "matched_peak_id"]].copy()
@@ -518,25 +553,25 @@ def assess_confidence(
     if duplicate_codes:
         penalize(
             min(30.0, 18.0 + 3.0 * len(duplicate_codes)),
-            f"Один пик назначен нескольким компонентам: {', '.join(duplicate_codes)}",
+            "Один участок сигнала похож сразу на несколько пиков",
         )
     missing_count = int(max(0, len(valid) - matched_count))
     if missing_count > 0:
-        penalize(min(18.0, 4.0 * missing_count), f"Есть неполные матчинг-пики ({missing_count})")
+        penalize(min(18.0, 4.0 * missing_count), "Некоторые пики не удалось определить")
 
     trio_codes = ["C20:5", "C22:6", "C22:5"]
     trio_missing = [code for code in trio_codes if area_of(code) <= 0]
     if trio_missing:
         if bool(omega.get("c22_missing_dha_coelution_applied", False)) and trio_missing == ["C22:6"]:
-            penalize(22.0, "DHA не разделён с DPA; использован режим co-elution")
+            penalize(22.0, "DHA и DPA не разделились — этот участок нужно проверить вручную")
         else:
-            penalize(35.0, f"Не найдены ключевые omega-3 пики: {', '.join(trio_missing)}")
+            penalize(35.0, f"Не найден важный пик: {', '.join(trio_missing)}")
 
     if np.isfinite(spread):
         if spread > 0.65:
-            penalize(14.0, f"Крупная коррекция strict/final omega ({spread:.2f})")
+            penalize(14.0, "Автоматическая поправка заметно изменила результат")
         elif spread > 0.45:
-            penalize(7.0, f"Заметная коррекция strict/final omega ({spread:.2f})")
+            penalize(7.0, "Результат потребовал дополнительной автоматической поправки")
 
     c18_scale = float(omega.get("c18_denominator_scale", 1.0))
     c18_1 = area_of("C18:1N9C")
@@ -547,7 +582,7 @@ def assess_confidence(
     c18_n3_fraction = c18_3 / c18_1 if c18_1 > 0 else np.nan
     c18_status = status_of("C18:1N9C")
     if c18_scale < 0.999:
-        penalize(8.0 if c18_scale >= 0.80 else 12.0, f"Сработала коррекция denominator для C18 ({c18_scale:.2f})")
+        penalize(8.0 if c18_scale >= 0.80 else 12.0, "Группа C18 потребовала дополнительной поправки")
     if (
         np.isfinite(c18_ratio)
         and np.isfinite(c18_n3_fraction)
@@ -556,9 +591,9 @@ def assess_confidence(
         and c18_n3_fraction < C18_DENOMINATOR_EXTREME_SMALL_N3_FRACTION
         and c18_width > C18_DENOMINATOR_EXTREME_WIDTH_MIN
     ):
-        penalize(10.0, "C18:1N9C выглядит перерастянутым относительно C18-кластера")
+        penalize(10.0, "Один из пиков C18 выглядит слишком широким")
     if "matched_c18_local_bounds" in c18_status or "matched_c18_pvfit" in c18_status:
-        penalize(6.0, "C18-кластер потребовал локальную переинтеграцию")
+        penalize(6.0, "Границы пиков C18 были уточнены автоматически")
 
     epa = area_of("C20:5")
     c20_3 = area_of("C20:3N8")
@@ -568,11 +603,11 @@ def assess_confidence(
     w_epa = width_of("C20:5")
     w_c20_3 = width_of("C20:3N8")
     if "matched_c20_fit" in epa_status:
-        penalize(10.0, "EPA восстанавливался через C20 fit")
+        penalize(10.0, "Пик C20:5 выделен неуверенно — проверьте его границы")
     elif "matched_c20_local" in epa_status:
-        penalize(5.0, "EPA потребовал локальную C20-коррекцию")
+        penalize(5.0, "Границы пика C20:5 были уточнены автоматически")
     if epa_credit > C20_EPA_UNDERFIT_CREDIT_MIN:
-        penalize(5.0, f"Существенный overlap-credit у EPA ({epa_credit:.1f})")
+        penalize(5.0, "Пик C20:5 частично сливается с соседним пиком")
     if (
         np.isfinite(epa_ratio)
         and np.isfinite(w_epa)
@@ -580,32 +615,34 @@ def assess_confidence(
         and epa_ratio < C20_EPA_UNDERFIT_RATIO_MAX
         and w_c20_3 > w_epa * C20_EPA_UNDERFIT_WIDTH_RATIO
     ):
-        penalize(10.0, "EPA выглядит недобранным относительно C20:3N8")
+        penalize(10.0, "Пик C20:5 может быть выделен не полностью")
     elif np.isfinite(epa_ratio) and epa_ratio < 0.30 and "matched_c20_local" in epa_status:
-        penalize(12.0, f"EPA мал относительно C20:3N8 (area ratio {epa_ratio:.2f})")
+        penalize(12.0, "Пик C20:5 слишком мал по сравнению с соседним")
 
     c22_statuses = [status_of(code) for code in ["C22:6", "C22:5", "C22:4"]]
     c22_status_text = " ".join(status for status in c22_statuses if status)
     c22_credit = float(omega.get("c22_overlap_credit_area", 0.0))
     c22_widths = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
     c22_mean_width = float(np.nanmean(c22_widths)) if np.isfinite(c22_widths).any() else np.nan
-    if "matched_c22_pvfit" in c22_status_text:
-        penalize(12.0, "C22-кластер потребовал pvfit refinement")
+    if "recovered_c22_local_unresolved" in c22_status_text:
+        penalize(14.0, "Пик C22:5 восстановлен автоматически — проверьте его границы")
+    elif "matched_c22_pvfit" in c22_status_text:
+        penalize(12.0, "Пики C22 сливаются и требуют визуальной проверки")
     elif "matched_c22_fit" in c22_status_text:
-        penalize(10.0, "C22-кластер потребовал fit-восстановление")
+        penalize(10.0, "Один из пиков C22 восстановлен автоматически")
     elif "tailtight" in c22_status_text:
-        penalize(6.0, "C22-кластер потребовал tail tightening")
+        penalize(6.0, "Хвосты пиков C22 пришлось уточнить автоматически")
     if c22_credit > 0:
-        penalize(2.0 if c22_credit < 80 else 4.0, f"C22 overlap-credit участвует в расчёте ({c22_credit:.1f})")
+        penalize(2.0 if c22_credit < 80 else 4.0, "Пики C22 частично перекрываются")
     if np.isfinite(c22_mean_width):
         if c22_mean_width > 0.036:
-            penalize(12.0, f"C22-кластер всё ещё широкий ({c22_mean_width:.3f} min)")
+            penalize(12.0, "Пики C22 сильно сливаются — проверьте границы")
         elif c22_mean_width > 0.032:
-            penalize(6.0, f"C22-кластер умеренно широкий ({c22_mean_width:.3f} min)")
+            penalize(6.0, "Пики C22 расположены близко друг к другу")
 
     peak_count = len(peaks) if peaks is not None else 0
     if peak_count >= 65:
-        penalize(5.0, f"Необычно много детектированных пиков ({peak_count})")
+        penalize(5.0, "На хроматограмме много лишних пиков")
 
     score = max(0.0, min(100.0, score))
     if score >= 85.0:
@@ -618,7 +655,7 @@ def assess_confidence(
         level = "Ручная проверка"
 
     reason_items.sort(key=lambda item: item[0], reverse=True)
-    reasons = [f"-{int(round(points))}: {text}" for points, text in reason_items]
+    reasons = [f"• {text}" for _points, text in reason_items]
     metrics = []
     if np.isfinite(strict_value) and np.isfinite(omega_value):
         metrics.append(f"Omega final / strict: {omega_value:.2f}% / {strict_value:.2f}%")

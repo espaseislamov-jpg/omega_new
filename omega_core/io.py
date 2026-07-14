@@ -11,6 +11,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from omega_batch_order import sort_batches_by_acquisition
+
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_REFERENCE_PATH = PROJECT_DIR / "reference_targets_reverted_c22fixed.json"
@@ -108,14 +110,6 @@ def extract_sample_name_from_header(file_path: Path) -> str:
 def extract_sample_name_from_text(text: str, fallback: str) -> str:
     match = _SAMPLE_NAME_RE.search(text or "")
     return match.group(0) if match else fallback
-
-
-def omega_sample_sort_key(name: str) -> tuple[int, int | str, str]:
-    text = name or ""
-    match = re.search(r"\bO(\d+)\b", text) or re.search(r"\bO(\d+)", text)
-    if match:
-        return (0, int(match.group(1)), text)
-    return (1, text, text)
 
 
 def finalize_chromatogram_dataframe(df: pd.DataFrame, cutoff_minutes: float = 4.0) -> pd.DataFrame:
@@ -228,7 +222,7 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float = 4.0) -> list[
     flush_current()
     if not batches:
         raise ValueError(f"No chromatogram batches parsed from {file_path}")
-    return sorted(batches, key=lambda batch: omega_sample_sort_key(batch.get("sample_name", batch.get("file_name", ""))))
+    return sort_batches_by_acquisition(batches)
 
 
 def load_batches(file_path: Path, cutoff_minutes: float = 4.0) -> list[dict[str, Any]]:
