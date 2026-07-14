@@ -100,6 +100,8 @@ def set_seed(seed: int) -> None:
 
 class FeatureNormalizer:
     def __init__(self) -> None:
+        self.lower_bounds: np.ndarray | None = None
+        self.upper_bounds: np.ndarray | None = None
         self.medians: np.ndarray | None = None
         self.means: np.ndarray | None = None
         self.scales: np.ndarray | None = None
@@ -107,24 +109,39 @@ class FeatureNormalizer:
     def fit(self, values: np.ndarray) -> "FeatureNormalizer":
         values = np.asarray(values, dtype=np.float64)
         with np.errstate(all="ignore"):
-            medians = np.nanmedian(values, axis=0)
+            lower_bounds = np.nanquantile(values, 0.01, axis=0)
+            upper_bounds = np.nanquantile(values, 0.99, axis=0)
+        lower_bounds = np.where(np.isfinite(lower_bounds), lower_bounds, 0.0)
+        upper_bounds = np.where(np.isfinite(upper_bounds), upper_bounds, lower_bounds)
+        clipped = np.clip(values, lower_bounds, upper_bounds)
+        with np.errstate(all="ignore"):
+            medians = np.nanmedian(clipped, axis=0)
         medians = np.where(np.isfinite(medians), medians, 0.0)
-        filled = np.where(np.isfinite(values), values, medians)
+        filled = np.where(np.isfinite(clipped), clipped, medians)
         means = np.mean(filled, axis=0)
         scales = np.std(filled, axis=0)
         scales = np.where(np.isfinite(scales) & (scales > 1e-9), scales, 1.0)
+        self.lower_bounds = lower_bounds.astype(np.float32)
+        self.upper_bounds = upper_bounds.astype(np.float32)
         self.medians = medians.astype(np.float32)
         self.means = means.astype(np.float32)
         self.scales = scales.astype(np.float32)
         return self
 
     def transform(self, values: np.ndarray) -> np.ndarray:
-        if self.medians is None or self.means is None or self.scales is None:
+        if (
+            self.lower_bounds is None
+            or self.upper_bounds is None
+            or self.medians is None
+            or self.means is None
+            or self.scales is None
+        ):
             raise RuntimeError("FeatureNormalizer has not been fitted")
         values = np.asarray(values, dtype=np.float32)
         missing = ~np.isfinite(values)
-        filled = np.where(missing, self.medians, values)
-        normalized = (filled - self.means) / self.scales
+        clipped = np.clip(values, self.lower_bounds, self.upper_bounds)
+        filled = np.where(missing, self.medians, clipped)
+        normalized = np.clip((filled - self.means) / self.scales, -8.0, 8.0)
         return np.concatenate([normalized, missing.astype(np.float32)], axis=1).astype(np.float32)
 
 
@@ -255,8 +272,9 @@ def predict(model: QualityMLP, values: np.ndarray, device: torch.device) -> np.n
     with torch.no_grad():
         outputs = model(torch.as_tensor(values, dtype=torch.float32, device=device)).cpu().numpy()
     prediction = np.empty_like(outputs, dtype=np.float64)
-    prediction[:, 0] = np.expm1(outputs[:, 0]).clip(min=0.0)
-    prediction[:, 1:] = 1.0 / (1.0 + np.exp(-outputs[:, 1:]))
+    prediction[:, 0] = np.expm1(np.clip(outputs[:, 0], -10.0, 5.0)).clip(min=0.0)
+    logits = np.clip(outputs[:, 1:], -30.0, 30.0)
+    prediction[:, 1:] = 1.0 / (1.0 + np.exp(-logits))
     return prediction
 
 
@@ -342,6 +360,8 @@ def export_numpy_model(
     np.savez_compressed(
         path,
         feature_names=np.asarray(feature_columns, dtype=str),
+        lower_bounds=normalizer.lower_bounds,
+        upper_bounds=normalizer.upper_bounds,
         medians=normalizer.medians,
         means=normalizer.means,
         scales=normalizer.scales,

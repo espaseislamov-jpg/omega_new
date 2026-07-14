@@ -144,7 +144,7 @@ def _aggregate_variant_values(prefix: str, values: list[float]) -> dict[str, flo
     return {
         f"{prefix}_variant_std": float(np.std(finite)),
         f"{prefix}_variant_range": value_range,
-        f"{prefix}_variant_relative_range": value_range / denominator,
+        f"{prefix}_variant_relative_range": float(np.clip(value_range / denominator, 0.0, 100.0)),
     }
 
 

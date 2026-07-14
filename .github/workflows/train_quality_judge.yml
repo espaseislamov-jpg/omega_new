@@ -60,6 +60,7 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload dataset, predictions, and frozen model
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: omega-quality-judge-${{ github.sha }}
