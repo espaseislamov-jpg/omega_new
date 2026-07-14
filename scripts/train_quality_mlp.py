@@ -44,6 +44,50 @@ META_AND_LABEL_COLUMNS = {
     "error_gt_0_3",
     "error_gt_0_5",
 }
+CORE_FEATURES = {
+    "calculated",
+    "confidence",
+    "cluster_quality_score",
+    "rt_shift",
+    "best_window",
+    "judge_accepted",
+    "judge_rejected",
+    "baseline_is_chebyshev",
+    "baseline_is_fallback",
+    "targets_total",
+    "targets_found",
+    "targets_missing",
+    "matched_peak_ids_unique",
+    "matched_peak_id_duplicates",
+    "omega_omega3_trio_strict",
+    "omega_total_area",
+    "omega_epa_area",
+    "omega_dha_area",
+    "omega_dpa_area",
+    "omega_epa_neighbor_area",
+    "omega_c22_reference_ratio",
+    "omega_c22_overintegration_debit_points",
+    "omega_c22_width_balance_points",
+    "omega_c18_denominator_scale",
+    "omega_epa_anchor_coefficient",
+    "variant_count_valid",
+    "variant_count_failed",
+    "calculated_variant_current_to_median",
+    "confidence_variant_range",
+    "cluster_quality_score_variant_range",
+}
+MODEL_TARGET_PREFIXES = (
+    "C18_2N6C_",
+    "C18_1N9C_",
+    "C18_3N3_",
+    "C20_4N6_",
+    "C20_5_",
+    "C20_3N8_",
+    "C22_6_",
+    "C22_5_",
+    "C22_4_",
+)
+CURRENT_TARGET_SUFFIXES = ("area", "rt_error", "width", "asymmetry")
 
 
 def set_seed(seed: int) -> None:
@@ -85,7 +129,7 @@ class FeatureNormalizer:
 
 
 class QualityMLP(nn.Module):
-    def __init__(self, input_size: int, hidden_sizes: tuple[int, int] = (64, 32), dropout: float = 0.15) -> None:
+    def __init__(self, input_size: int, hidden_sizes: tuple[int, int] = (48, 24), dropout: float = 0.18) -> None:
         super().__init__()
         self.layer1 = nn.Linear(input_size, hidden_sizes[0])
         self.layer2 = nn.Linear(hidden_sizes[0], hidden_sizes[1])
@@ -99,10 +143,28 @@ class QualityMLP(nn.Module):
         return self.output(values)
 
 
+def _is_production_model_feature(column: str) -> bool:
+    if column in CORE_FEATURES or column.startswith("status_count_"):
+        return True
+    if column.startswith(MODEL_TARGET_PREFIXES) and column.endswith(CURRENT_TARGET_SUFFIXES):
+        return True
+    if "_variant_" not in column:
+        return False
+    if column.endswith("_found_rt_variant_range"):
+        return column.startswith(MODEL_TARGET_PREFIXES)
+    if column.endswith("_variant_relative_range"):
+        return (
+            column.startswith("omega_")
+            or column.startswith("calculated_")
+            or (column.startswith(MODEL_TARGET_PREFIXES) and ("_area_" in column or "_width_" in column))
+        )
+    return False
+
+
 def select_feature_columns(frame: pd.DataFrame) -> list[str]:
     columns: list[str] = []
     for column in frame.columns:
-        if column in META_AND_LABEL_COLUMNS:
+        if column in META_AND_LABEL_COLUMNS or not _is_production_model_feature(column):
             continue
         values = pd.to_numeric(frame[column], errors="coerce")
         finite = values[np.isfinite(values)]

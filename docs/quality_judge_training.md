@@ -7,6 +7,10 @@ boundaries and does not predict the manual omega value. It estimates only:
 - probability that the absolute error is greater than 0.3;
 - probability that the absolute error is greater than 0.5.
 
+The trainer uses a compact, domain-selected feature set rather than feeding all
+exported diagnostic columns to the network. This keeps the parameter count
+reasonable for a few hundred labeled chromatograms.
+
 ## Leakage protection
 
 All input features are available from the production integrator before a manual
@@ -25,7 +29,8 @@ The `Train neural quality judge` GitHub Actions workflow performs the expensive
 work on a GitHub-hosted runner:
 
 1. Recalculate every labeled chromatogram sequentially with the current engine.
-2. Export numeric peak geometry and integration-decision features.
+2. Re-run several reference-free baseline variants and export both peak geometry
+   and the resulting disagreement in omega, areas, and integration boundaries.
 3. Hold out each error-bearing batch in turn, together with several normal
    batches. This prevents an aggregate score from merely identifying one bad
    date instead of learning transferable integration geometry.
