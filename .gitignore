@@ -9,4 +9,5 @@ regression_outputs/
 build/
 dist/
 installer_output/
+artifacts/
 *.spec.bak

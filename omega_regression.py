@@ -66,21 +66,46 @@ def load_excel_refs(xlsx_path: Path) -> list[ExcelReference]:
     raw = pd.read_excel(xlsx_path, header=None)
     refs: list[ExcelReference] = []
     for excel_idx, row in enumerate(raw.itertuples(index=False), start=1):
-        sample_token = None
-        ref_value = None
-        for value in row:
+        numeric_cells: list[tuple[int, float]] = []
+        instrument_tokens: list[tuple[int, int]] = []
+        for column_idx, value in enumerate(row):
             if pd.isna(value):
                 continue
-            if sample_token is None:
-                text = str(value).strip()
-                if text.isdigit():
-                    sample_token = int(text)
-                    continue
-            if ref_value is None:
-                try:
-                    ref_value = float(str(value).strip().replace(",", "."))
-                except ValueError:
-                    pass
+            text = str(value).strip()
+            instrument_match = re.fullmatch(r"O(\d+)", text, flags=re.IGNORECASE)
+            if instrument_match:
+                instrument_tokens.append((column_idx, int(instrument_match.group(1))))
+            try:
+                numeric_cells.append((column_idx, float(text.replace(" ", "").replace(",", "."))))
+            except ValueError:
+                continue
+
+        # Prefer the long laboratory sample ID. Some workbooks have a leading
+        # numeric injection index (1, 2, 3, ...), which must not be mistaken
+        # for either the sample ID or the manual omega value.
+        id_cells = [
+            (column_idx, int(value))
+            for column_idx, value in numeric_cells
+            if float(value).is_integer() and abs(value) > 1000
+        ]
+        if id_cells:
+            sample_column, sample_token = id_cells[0]
+        elif instrument_tokens:
+            sample_column, sample_token = instrument_tokens[0]
+        else:
+            integer_cells = [
+                (column_idx, int(value))
+                for column_idx, value in numeric_cells
+                if float(value).is_integer() and value > 0
+            ]
+            if not integer_cells:
+                continue
+            sample_column, sample_token = integer_cells[0]
+
+        ref_value = next(
+            (value for column_idx, value in numeric_cells if column_idx > sample_column),
+            None,
+        )
         if sample_token is not None and ref_value is not None:
             refs.append(ExcelReference(excel_idx, len(refs) + 1, sample_token, ref_value))
     return refs
@@ -114,12 +139,6 @@ def build_batch_records(csv_path: Path) -> list[BatchRecord]:
 
 
 def resolve_batch(ref: ExcelReference, batches: list[BatchRecord], date: str) -> tuple[BatchRecord | None, str]:
-    if date in POSITION_MATCH_DATES:
-        batch_index = ref.ordinal - 1
-        if 0 <= batch_index < len(batches):
-            return batches[batch_index], "position_date_override"
-        return None, "missing_position_date_override"
-
     by_sample_id = {batch.sample_id: batch for batch in batches if batch.sample_id is not None}
     by_instrument_no = {batch.instrument_no: batch for batch in batches if batch.instrument_no is not None}
 
@@ -128,6 +147,12 @@ def resolve_batch(ref: ExcelReference, batches: list[BatchRecord], date: str) ->
         if matched is not None:
             return matched, "sample_id"
         return None, "missing_sample_id"
+
+    if date in POSITION_MATCH_DATES:
+        batch_index = ref.ordinal - 1
+        if 0 <= batch_index < len(batches):
+            return batches[batch_index], "position_date_override"
+        return None, "missing_position_date_override"
 
     matched = by_instrument_no.get(ref.token)
     if matched is not None:

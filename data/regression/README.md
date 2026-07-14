@@ -10,8 +10,6 @@ The first reference row in `test_bigbatch_03072026.xlsx` belongs to the blank
 building the labeled sample table; the remaining 75 sample IDs match the 75
 chromatograms exactly.
 
-The `06072026.CSV` batch currently has no manual reference workbook.
-
 The `14072026.CSV` batch is the sealed final evaluation set. Its manual results
 must not be added to the repository or used during feature design, training, or
 model selection. They may be opened only for the final one-time evaluation of a
