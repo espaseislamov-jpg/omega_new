@@ -3835,12 +3835,21 @@ class ChromatogramApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Chromatogram Peak Detector (Integrated)")
-        screen_width = max(int(self.root.winfo_screenwidth()), 1200)
-        screen_height = max(int(self.root.winfo_screenheight()), 760)
-        initial_width = min(1780, int(screen_width * 0.94))
-        initial_height = min(1040, int(screen_height * 0.90))
+        screen_width = max(int(self.root.winfo_screenwidth()), 800)
+        screen_height = max(int(self.root.winfo_screenheight()), 600)
+        self.screen_width = screen_width
+        self.screen_height = screen_height
+        self.compact_ui = screen_width < 1650 or screen_height < 950
+        initial_width = min(1780, max(960, int(screen_width * 0.94)))
+        initial_height = min(1040, max(640, int(screen_height * 0.88)))
+        initial_width = min(initial_width, screen_width)
+        initial_height = min(initial_height, screen_height)
+        self.initial_window_width = initial_width
+        self.initial_window_height = initial_height
         self.root.geometry(f"{initial_width}x{initial_height}")
-        self.root.minsize(1100, 700)
+        min_width = max(900, min(1050, int(screen_width * 0.72)))
+        min_height = max(580, min(680, int(screen_height * 0.70)))
+        self.root.minsize(min_width, min_height)
 
         self.reference_json_path = ensure_runtime_file("reference_targets_reverted_c22fixed.json")
         self.reference_targets = omega_chromatopy_clean.load_reference_targets(self.reference_json_path)
@@ -3923,7 +3932,14 @@ class ChromatogramApp:
         self.main_pane.add(plot_frame, weight=4)
         self.main_pane.add(sidebar, weight=1)
 
-        self.figure = Figure(figsize=(12, 8), dpi=100)
+        # FigureCanvasTkAgg propagates the Figure's requested pixel size to Tk.
+        # A fixed 1200x800 canvas made the whole UI wider than smaller screens.
+        # These are only Tk's requested dimensions; the packed canvas expands
+        # with the window.  Keep the request deliberately compact so panes can
+        # also shrink cleanly on laptops and scaled Windows desktops.
+        figure_width_px = max(650, int(self.initial_window_width * (0.52 if self.compact_ui else 0.62)))
+        figure_height_px = max(460, int(self.initial_window_height - (240 if self.compact_ui else 180)))
+        self.figure = Figure(figsize=(figure_width_px / 100.0, figure_height_px / 100.0), dpi=100)
         self.figure.subplots_adjust(left=0.055, right=0.985, top=0.955, bottom=0.065)
         grid = self.figure.add_gridspec(3, 2, height_ratios=[2.5, 1.0, 1.0], hspace=0.26, wspace=0.18)
         self.ax = self.figure.add_subplot(grid[0, :])
@@ -3946,20 +3962,27 @@ class ChromatogramApp:
         toolbar.update()
         toolbar.pack(side="left", fill="x")
 
-        sidebar_pane = ttk.Panedwindow(sidebar, orient="vertical")
-        sidebar_pane.pack(fill="both", expand=True)
-        batch_frame = ttk.LabelFrame(sidebar_pane, text="Batch", padding=(8, 8))
-        sidebar_pane.add(batch_frame, weight=1)
+        self.sidebar_pane = ttk.Panedwindow(sidebar, orient="vertical")
+        self.sidebar_pane.pack(fill="both", expand=True)
+        batch_frame = ttk.LabelFrame(self.sidebar_pane, text="Batch", padding=(8, 8))
+        self.sidebar_pane.add(batch_frame, weight=1)
         batch_columns = ("sample_name", "omega_value", "confidence")
         batch_tree_frame = ttk.Frame(batch_frame)
         batch_tree_frame.pack(fill="both", expand=True)
-        self.batch_tree = ttk.Treeview(batch_tree_frame, columns=batch_columns, show="headings", height=14, selectmode="browse")
+        self.batch_tree = ttk.Treeview(
+            batch_tree_frame,
+            columns=batch_columns,
+            show="headings",
+            height=8 if self.compact_ui else 14,
+            selectmode="browse",
+        )
         self.batch_tree.heading("sample_name", text="Образец")
         self.batch_tree.heading("omega_value", text="Omega-3")
         self.batch_tree.heading("confidence", text="Решение")
-        self.batch_tree.column("sample_name", width=230, minwidth=120, anchor="w", stretch=True)
-        self.batch_tree.column("omega_value", width=80, minwidth=65, anchor="center", stretch=False)
-        self.batch_tree.column("confidence", width=205, minwidth=150, anchor="w", stretch=True)
+        batch_widths = (190, 70, 165) if self.compact_ui else (230, 80, 205)
+        self.batch_tree.column("sample_name", width=batch_widths[0], minwidth=110, anchor="w", stretch=True)
+        self.batch_tree.column("omega_value", width=batch_widths[1], minwidth=60, anchor="center", stretch=False)
+        self.batch_tree.column("confidence", width=batch_widths[2], minwidth=125, anchor="w", stretch=True)
         self.batch_tree.pack(side="left", fill="both", expand=True)
         batch_scroll = ttk.Scrollbar(batch_tree_frame, orient="vertical", command=self.batch_tree.yview)
         batch_scroll.pack(side="right", fill="y")
@@ -3967,8 +3990,8 @@ class ChromatogramApp:
         self.batch_tree.bind("<<TreeviewSelect>>", self.handle_batch_tree_selection)
         self._configure_quality_tags(self.batch_tree)
 
-        details_frame = ttk.Frame(sidebar_pane)
-        sidebar_pane.add(details_frame, weight=3)
+        details_frame = ttk.Frame(self.sidebar_pane)
+        self.sidebar_pane.add(details_frame, weight=3)
         table_frame = ttk.LabelFrame(details_frame, text="Пики", padding=(8, 8))
         table_frame.pack(fill="both", expand=True, pady=(10, 0))
         # Keep the values used for manual review in the visible part of the
@@ -3976,7 +3999,12 @@ class ChromatogramApp:
         cols = ["display_name", "area", "percent_area", "code", "expected_rt", "found_rt", "status"]
         peaks_tree_frame = ttk.Frame(table_frame)
         peaks_tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(peaks_tree_frame, columns=cols, show="headings", height=18)
+        self.tree = ttk.Treeview(
+            peaks_tree_frame,
+            columns=cols,
+            show="headings",
+            height=10 if self.compact_ui else 18,
+        )
         headings = {
             "display_name": "Пик",
             "area": "Площадь",
@@ -3995,6 +4023,16 @@ class ChromatogramApp:
             "found_rt": 82,
             "status": 220,
         }
+        if self.compact_ui:
+            widths.update({
+                "display_name": 150,
+                "area": 85,
+                "percent_area": 48,
+                "code": 70,
+                "expected_rt": 68,
+                "found_rt": 68,
+                "status": 150,
+            })
         for c in cols:
             self.tree.heading(c, text=headings[c])
             width = widths[c]
@@ -4024,6 +4062,21 @@ class ChromatogramApp:
         status = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 4))
         status.pack(fill="x")
         self.update_batch_navigation()
+        self.root.after_idle(self._apply_responsive_pane_positions)
+
+    def _apply_responsive_pane_positions(self):
+        """Give the plot and both sidebar sections useful space on this screen."""
+        try:
+            self.root.update_idletasks()
+            pane_width = self.main_pane.winfo_width()
+            pane_height = self.sidebar_pane.winfo_height()
+            if pane_width > 1:
+                plot_fraction = 0.68 if self.compact_ui else 0.72
+                self.main_pane.sashpos(0, max(620, int(pane_width * plot_fraction)))
+            if pane_height > 1:
+                self.sidebar_pane.sashpos(0, max(150, int(pane_height * 0.30)))
+        except tk.TclError:
+            pass
 
     def update_batch_navigation(self):
         total = len(self.loaded_batches)
@@ -4172,7 +4225,15 @@ class ChromatogramApp:
         self.manual_start_var.set(f"{float(x[start_idx]):.5f}")
         self.manual_end_var.set(f"{float(x[end_idx]):.5f}")
         self.selected_target_code = str(self.selected_target_code)
-        self.refresh_peaks(preserve_plot_view=True)
+        # Keep the existing axes intact: clearing/recreating them also resets
+        # Matplotlib toolbar zoom history even when xlim/ylim are restored.
+        self.refresh_peaks(redraw_plot=False)
+        if self._manual_overlay_artists:
+            self._manual_drag_axis = None
+            self._manual_drag_pending_bounds = (float(x[start_idx]), float(x[end_idx]))
+            self._flush_manual_drag_overlay()
+        else:
+            self.update_plot(preserve_view=True)
         if self.selected_target_code in self.tree.get_children():
             self.tree.selection_set(self.selected_target_code)
             self.tree.focus(self.selected_target_code)
@@ -4271,8 +4332,42 @@ class ChromatogramApp:
                     linewidth=0.0,
                     zorder=3,
                 )
+                visual_fill_artist = artists.get("visual_fill")
+                if visual_fill_artist is not None:
+                    visual_fill_artist.remove()
+                    selected_match = self.matched_targets_df[
+                        self.matched_targets_df["code"] == self.selected_target_code
+                    ]
+                    if not selected_match.empty:
+                        visual_row = selected_match.iloc[0].copy()
+                        visual_row["integration_start_x"] = start_x
+                        visual_row["integration_end_x"] = end_x
+                        visual_start_x, visual_end_x = self._visual_peak_footprint_bounds(
+                            visual_row,
+                            x,
+                            artists["y_smooth"],
+                        )
+                        visual_start_idx = int(np.argmin(np.abs(x - visual_start_x)))
+                        visual_end_idx = int(np.argmin(np.abs(x - visual_end_x)))
+                        artists["visual_fill"] = axis.fill_between(
+                            x[visual_start_idx:visual_end_idx + 1],
+                            0.0,
+                            artists["visual_fill_y"][visual_start_idx:visual_end_idx + 1],
+                            color="#ff7c96",
+                            alpha=0.26 if artists["compact"] else 0.28,
+                            linewidth=0.0,
+                            zorder=2.7,
+                        )
                 artists["start_line"].set_xdata([start_x, start_x])
                 artists["end_line"].set_xdata([end_x, end_x])
+                apex_idx = int(start_idx + np.argmax(fill_y[start_idx:end_idx + 1]))
+                marker = artists.get("marker")
+                if marker is not None:
+                    marker.set_offsets(np.asarray([[x[apex_idx], artists["marker_y"][apex_idx]]]))
+                annotation = artists.get("annotation")
+                if annotation is not None:
+                    annotation.xy = (x[apex_idx], artists["marker_y"][apex_idx])
+                    annotation.set_text(f"{self.selected_target_code}  RT {x[apex_idx]:.4f}")
                 changed_axes.append(axis)
             except (KeyError, ValueError, RuntimeError):
                 continue
@@ -4612,7 +4707,7 @@ class ChromatogramApp:
         self._preload_batch_index += 1
         self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
-    def refresh_peaks(self, preserve_plot_view: bool = False):
+    def refresh_peaks(self, preserve_plot_view: bool = False, redraw_plot: bool = True):
         if self.df_processed is None:
             return
         current_batch = self.loaded_batches[self.current_batch_index] if self.loaded_batches else None
@@ -4662,7 +4757,8 @@ class ChromatogramApp:
         self.confidence_var.set(confidence.get("button_text", "Качество пиков: —"))
         self.confidence_button.state(["!disabled"])
 
-        self.update_plot(preserve_view=preserve_plot_view)
+        if redraw_plot:
+            self.update_plot(preserve_view=preserve_plot_view)
         self.update_table()
 
         self.status_var.set(
@@ -4881,8 +4977,9 @@ class ChromatogramApp:
                 visual_start_idx = int(np.argmin(np.abs(x - visual_start_x)))
                 visual_end_idx = int(np.argmin(np.abs(x - visual_end_x)))
                 visual_fill = np.clip(y_smooth_draw, 0.0, None)
+                selected_visual_fill_artist = None
                 if visual_end_idx > visual_start_idx:
-                    axis.fill_between(
+                    selected_visual_fill_artist = axis.fill_between(
                         x[visual_start_idx:visual_end_idx + 1],
                         0.0,
                         visual_fill[visual_start_idx:visual_end_idx + 1],
@@ -4908,9 +5005,13 @@ class ChromatogramApp:
                     "end_line": end_line,
                     "x": x,
                     "fill_y": fill_y_draw,
+                    "y_smooth": y_smooth,
+                    "visual_fill_y": visual_fill,
+                    "visual_fill": selected_visual_fill_artist,
+                    "marker_y": marker_y_draw,
                     "compact": compact,
                 }
-                axis.scatter(
+                selected_marker_artist = axis.scatter(
                     x[apex_idx],
                     marker_y_draw[apex_idx],
                     s=44 if compact else 70,
@@ -4919,6 +5020,7 @@ class ChromatogramApp:
                     linewidth=1.3 if compact else 1.6,
                     zorder=6,
                 )
+                self._manual_overlay_artists[axis]["marker"] = selected_marker_artist
 
         visible_codes = []
         if not self.matched_targets_df.empty:
@@ -4951,7 +5053,7 @@ class ChromatogramApp:
             if (x_min is None or selected_rt >= x_min) and (x_max is None or selected_rt <= x_max):
                 apex_idx = int(np.argmin(np.abs(x - selected_rt)))
                 label_text = f"{selected_row['code']}  RT {selected_rt:.4f}"
-                axis.annotate(
+                selected_annotation = axis.annotate(
                     label_text,
                     xy=(selected_rt, marker_y_draw[apex_idx]),
                     xytext=(10, 12 if compact else 14),
@@ -4962,6 +5064,8 @@ class ChromatogramApp:
                     arrowprops={"arrowstyle": "->", "color": "#ff4d6d", "lw": 0.9},
                     zorder=7,
                 )
+                if axis in self._manual_overlay_artists:
+                    self._manual_overlay_artists[axis]["annotation"] = selected_annotation
 
         if x_min is not None and x_max is not None:
             axis.set_xlim(float(x_min), float(x_max))
