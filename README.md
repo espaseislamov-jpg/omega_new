@@ -81,7 +81,7 @@ Large local archives, extracted data folders, and debug folders are intentionall
 
 ## Build omega_v2 executable
 
-`omega_v2.py` is the bootstrap launcher for the GUI. When it is started from source on a machine with Python 3.10+, it checks the required Python packages and installs missing dependencies from `requirements.txt` / `requirements-chromatopy.txt` before launching `New_idea.py`.
+`omega_v2.py` is the bootstrap launcher for the GUI. When it is started from source on a machine with Python 3.10+, it checks the required Python packages and installs missing dependencies from `requirements.txt` before launching `New_idea.py`. Experimental judge-training tools use the separate `requirements-training.txt` file and are not bundled into the desktop application.
 
 Build the distributable app with PyInstaller:
 

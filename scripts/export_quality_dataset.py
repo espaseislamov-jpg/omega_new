@@ -20,7 +20,7 @@ import omega_regression as regression
 DEFAULT_DATA_DIR = PROJECT_DIR / "data" / "regression"
 DEFAULT_REFERENCE_PATH = PROJECT_DIR / "reference_targets_reverted_c22fixed.json"
 DEFAULT_OUTPUT = PROJECT_DIR / "artifacts" / "quality_dataset.csv"
-SEALED_DATES = frozenset({"14072026"})
+SEALED_DATES = frozenset({"12072026", "14072026"})
 STATUS_TOKENS = (
     "not_found",
     "recovered",

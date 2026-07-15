@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from . import legacy_fit, metrics, rt_profile
+from . import fit_recovery, metrics, rt_profile
 from .signal import (
     CHEMSTATION_INITIAL_AREA_REJECT,
     CHEMSTATION_INITIAL_THRESHOLD,
@@ -1817,11 +1817,11 @@ def refine_cluster_matches(
     matched_targets = refine_overlapped_c22_cluster_areas(processed, peaks, matched_targets)
     matched_targets = refine_cluster_areas_by_local_valleys(processed, matched_targets)
     matched_targets = recover_single_missing_c22_by_local_bounds(processed, matched_targets)
-    matched_targets = legacy_fit.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
-    matched_targets = legacy_fit.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
-    matched_targets = legacy_fit.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)
     matched_targets = tighten_overwide_c22_cluster_tails(processed, matched_targets)
-    matched_targets = legacy_fit.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
     matched_targets = refine_small_peak_integrations(processed, matched_targets)
     matched_targets = expand_final_peak_boundaries(processed, matched_targets)
     matched_targets = tighten_dpa_overintegration_by_local_bounds(processed, matched_targets)

@@ -5,7 +5,6 @@ import sys
 
 REQUIRED_IMPORTS = [
     "chromatopy",
-    "hdbscan",
     "lmfit",
     "matplotlib",
     "numpy",
@@ -14,7 +13,6 @@ REQUIRED_IMPORTS = [
     "pybaselines",
     "pyopenms",
     "scipy",
-    "sklearn",
 ]
 
 

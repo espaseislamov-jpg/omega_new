@@ -14,7 +14,8 @@ acquisition position, not by the printed sample ID; the final workbook row has
 no non-empty chromatogram. Direct ID matching produces an artificial alternating
 error pattern (64 false `>0.5` labels).
 
-The `14072026.CSV` batch is the sealed final evaluation set. Its manual results
+The batch formerly labeled `14072026.CSV` was acquired on `12072026`; `14072026`
+was its processing date. It is the sealed final evaluation set. Its manual results
 must not be added to the repository or used during feature design, training, or
 model selection. They may be opened only for the final one-time evaluation of a
 frozen quality model.

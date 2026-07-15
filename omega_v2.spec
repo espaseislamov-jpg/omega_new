@@ -3,7 +3,6 @@ from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = [
     "New_idea",
-    "omega_chromatopy_clean",
     "omega_path_compat",
     "matplotlib.backends.backend_tkagg",
     "scipy.optimize",
@@ -13,8 +12,6 @@ hiddenimports = [
     "openpyxl",
     "pybaselines",
     "lmfit",
-    "sklearn",
-    "hdbscan",
     "chromatopy",
     "pyopenms",
 ]
@@ -29,7 +26,6 @@ excludes = [
     "pandas.tests",
     "scipy.tests",
     "matplotlib.tests",
-    "sklearn.tests",
     "PyQt5",
     "PyQt6",
     "PySide2",
@@ -45,8 +41,6 @@ a = Analysis(
     datas=[
         ("reference_targets_reverted_c22fixed.json", "."),
         ("chebyshev_coefficients.csv", "."),
-        ("requirements.txt", "."),
-        ("requirements-chromatopy.txt", "."),
     ],
     hiddenimports=hiddenimports,
     hookspath=[],
