@@ -1,5 +1,5 @@
-#define MyAppName "Omega v2"
-#define MyAppVersion "2.0"
+#define MyAppName "Omega v2.5"
+#define MyAppVersion "2.5"
 #define MyAppPublisher "Omega"
 #define MyAppExeName "omega_v2.exe"
 
@@ -8,12 +8,12 @@ AppId={{8F342910-9F62-46E8-88D6-0A3E2C0B2002}}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\Programs\Omega v2
+DefaultDirName={localappdata}\Programs\Omega v2.5
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 OutputDir=..\installer_output
-OutputBaseFilename=omega_v2_setup
+OutputBaseFilename=omega_v2.5_setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
