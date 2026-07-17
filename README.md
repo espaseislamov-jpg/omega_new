@@ -113,6 +113,6 @@ For a non-programmer workflow, use the GitHub Actions artifact:
 4. Press **Run workflow** on branch `work`.
 5. Wait until the run becomes green.
 6. Open the finished run and download artifact **omega_v2_windows_setup**.
-7. Unzip it and run `omega_v2.5_setup.exe`.
+7. Unzip it and run `omega_v2.6_setup.exe`.
 
 The workflow also uploads **omega_v2_windows_portable** if you want the raw portable folder without installer.

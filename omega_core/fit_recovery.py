@@ -60,6 +60,18 @@ def _robust_sigma(values: np.ndarray) -> float:
     return float(sigma)
 
 
+def _least_squares_inputs_are_valid(p0, lower_bounds, upper_bounds) -> bool:
+    """Reject malformed fit inputs before SciPy can abort batch processing."""
+    start = np.asarray(p0, dtype=float)
+    lower = np.asarray(lower_bounds, dtype=float)
+    upper = np.asarray(upper_bounds, dtype=float)
+    if start.shape != lower.shape or start.shape != upper.shape or start.size == 0:
+        return False
+    if not (np.all(np.isfinite(start)) and np.all(np.isfinite(lower)) and np.all(np.isfinite(upper))):
+        return False
+    return bool(np.all(lower < upper) and np.all(start >= lower) and np.all(start <= upper))
+
+
 def _get_x_column_name(df: pd.DataFrame) -> str:
     if "x_corrected" in df.columns:
         return "x_corrected"
@@ -734,12 +746,17 @@ def _fit_cluster_components_split_pseudovoigt(
         residual = (prediction - y) * weights
         return np.concatenate([residual, penalties])
 
-    result = least_squares(
-        residuals,
-        p0,
-        bounds=(lower_bounds, upper_bounds),
-        max_nfev=18000,
-    )
+    if not _least_squares_inputs_are_valid(p0, lower_bounds, upper_bounds):
+        return None, {}
+    try:
+        result = least_squares(
+            residuals,
+            p0,
+            bounds=(lower_bounds, upper_bounds),
+            max_nfev=18000,
+        )
+    except (ValueError, FloatingPointError):
+        return None, {}
     if not result.success:
         return None, {}
 
@@ -848,7 +865,12 @@ def _fit_cluster_components_gaussian(
             prediction += _gaussian_component(x, amplitude, center, sigma)
         return (prediction - y) * weights
 
-    result = least_squares(residuals, p0, bounds=(lower_bounds, upper_bounds), max_nfev=12000)
+    if not _least_squares_inputs_are_valid(p0, lower_bounds, upper_bounds):
+        return None
+    try:
+        result = least_squares(residuals, p0, bounds=(lower_bounds, upper_bounds), max_nfev=12000)
+    except (ValueError, FloatingPointError):
+        return None
     if not result.success:
         return None
 

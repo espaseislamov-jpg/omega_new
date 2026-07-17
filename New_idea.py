@@ -60,7 +60,7 @@ def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.Da
 class ChromatogramApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Chromatogram Peak Detector (Integrated)")
+        self.root.title("Omega v2.6 — Chromatogram Peak Detector")
         screen_width = max(int(self.root.winfo_screenwidth()), 800)
         screen_height = max(int(self.root.winfo_screenheight()), 600)
         self.screen_width = screen_width

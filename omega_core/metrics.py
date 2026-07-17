@@ -790,7 +790,9 @@ def assess_confidence(
     epa_ratio = epa / c20_3 if c20_3 > 0 else np.nan
     w_epa = width_of("C20:5")
     w_c20_3 = width_of("C20:3N8")
-    if "matched_c20_fit" in epa_status:
+    if "identity_center_locked" in epa_status:
+        penalize(10.0, "Математическая модель C20:5 ушла в сторону — проверьте выбранную вершину")
+    elif "matched_c20_fit" in epa_status:
         penalize(10.0, "Пик C20:5 выделен неуверенно — проверьте его границы")
     elif "matched_c20_local" in epa_status:
         penalize(5.0, "Границы пика C20:5 были уточнены автоматически")
