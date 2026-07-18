@@ -20,8 +20,6 @@ REQUIRED_MODULES = {
     "openpyxl": "openpyxl",
     "pybaselines": "pybaselines",
     "lmfit": "lmfit",
-    "sklearn": "scikit-learn",
-    "hdbscan": "hdbscan",
 }
 OPTIONAL_MODULES = {
     "pyopenms": "pyopenms",

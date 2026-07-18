@@ -1,21 +1,24 @@
 from __future__ import annotations
 
 from pathlib import Path
-import os
-import warnings
 
 import numpy as np
 import pandas as pd
 
 from . import chromatopy_adapter, clusters, io, matching, metrics, rt_profile, signal
 
-FULL_CHROMATOPY_ENGINE = os.environ.get("OMEGA_ENGINE", "current").strip().lower() in {"chromatopy", "chromatopy_clean", "full_chromatopy"}
-
-
-def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
+def process_from_baseline(
+    processed: pd.DataFrame,
+    reference_targets: pd.DataFrame,
+    strict_matching: bool = False,
+) -> dict:
     processed, best_window = signal.add_smoothing_and_derivatives(processed)
     peaks = signal.detect_peak_candidates(processed, best_window=best_window)
-    matched_targets, rt_shift = matching.match_targets_to_peaks(reference_targets, peaks)
+    matched_targets, rt_shift = matching.match_targets_to_peaks(
+        reference_targets,
+        peaks,
+        strict=strict_matching,
+    )
     matched_targets = chromatopy_adapter.apply_chromatopy_target_integration(processed, matched_targets)
     peaks, matched_targets = clusters.refine_cluster_matches(processed, peaks, matched_targets)
     matched_targets = rt_profile.annotate_rt_profile(matched_targets)
@@ -31,57 +34,6 @@ def process_from_baseline(processed: pd.DataFrame, reference_targets: pd.DataFra
         "omega": omega,
         "omega_report": omega["omega3_trio"],
     }
-
-
-
-def _prepare_chromatopy_matched_targets(matched: pd.DataFrame) -> pd.DataFrame:
-    out = matched.copy()
-    if "target_rt" in out and "corrected_target_rt" not in out:
-        out["corrected_target_rt"] = out["target_rt"]
-    if "matched_peak_id" not in out:
-        out["matched_peak_id"] = np.nan
-    if "match_score" not in out:
-        out["match_score"] = np.nan
-    for peak_id, row_idx in enumerate(out.index[out["found_rt"].notna()], start=1):
-        out.at[row_idx, "matched_peak_id"] = peak_id
-        out.at[row_idx, "match_score"] = 0.0
-    return rt_profile.annotate_rt_profile(out)
-
-
-def process_chromatopy_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
-    import omega_chromatopy_clean
-
-    config = omega_chromatopy_clean.IntegrationConfig(use_chromatopy_fit=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        clean_result = omega_chromatopy_clean.integrate_batch(dataframe, reference_targets, config)
-
-    processed = clean_result["processed_df"]
-    processed = signal.add_smoothing_and_derivatives(processed)[0] if "dy" not in processed else processed
-    matched_targets = _prepare_chromatopy_matched_targets(clean_result["matched_targets_df"])
-    omega = metrics.compute_omega(matched_targets)
-    peaks = pd.DataFrame({
-        "peak_id": pd.to_numeric(matched_targets["matched_peak_id"], errors="coerce"),
-        "apex_x": pd.to_numeric(matched_targets["found_rt"], errors="coerce"),
-        "area": pd.to_numeric(matched_targets["area"], errors="coerce"),
-    }).dropna(subset=["peak_id", "apex_x"]).reset_index(drop=True)
-    cluster_quality = metrics.compute_cluster_quality(matched_targets)
-    confidence = metrics.assess_confidence(matched_targets, peaks, omega, "chromatopy_clean", cluster_quality)
-    return {
-        "engine": "chromatopy_clean",
-        "processed_df": processed,
-        "best_window": config.smoothing_window,
-        "peaks_df": peaks,
-        "matched_targets_df": matched_targets,
-        "judge_decisions_df": pd.DataFrame(),
-        "rt_shift": clean_result.get("rt_shift", 0.0),
-        "omega": omega,
-        "omega_report": omega["omega3_trio"],
-        "boundary_mode": clean_result.get("boundary_mode", "chromatopy"),
-        "cluster_quality_score": cluster_quality,
-        "confidence": confidence,
-    }
-
 def _target_width(matched_targets: pd.DataFrame, code: str) -> float:
     row = matched_targets[matched_targets["code"] == code]
     if row.empty:
@@ -180,7 +132,10 @@ def _confidence_score(result: dict) -> float:
     confidence = result.get("confidence", {})
     if not isinstance(confidence, dict):
         return np.nan
-    return float(confidence.get("score", np.nan))
+    # The high-recall production judge may lower the displayed score to force a
+    # review, but it must never change baseline/model selection and therefore
+    # must never change the reported omega value.
+    return float(confidence.get("geometry_score", confidence.get("score", np.nan)))
 
 
 def _accept_asls_shape_fallback(current: dict, candidate: dict) -> bool:
@@ -258,14 +213,115 @@ def _maybe_apply_asls_shape_fallback(
     return current_result
 
 
-def process_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
-    if FULL_CHROMATOPY_ENGINE:
-        try:
-            return process_chromatopy_batch(dataframe, reference_targets)
-        except Exception:
-            if os.environ.get("OMEGA_REQUIRE_CHROMATOPY", "0").strip() == "1":
-                raise
+def _is_structural_stop(result: dict) -> bool:
+    confidence = result.get("confidence", {})
+    risk = confidence.get("high_error_risk", {}) if isinstance(confidence, dict) else {}
+    reason_codes = set(risk.get("reason_codes", [])) if isinstance(risk, dict) else set()
+    return bool(reason_codes & {"missing_key_peak", "duplicate_peak_assignment"})
 
+
+def _strict_assignments_are_sane(result: dict) -> tuple[bool, str]:
+    matched = result.get("matched_targets_df")
+    if matched is None or matched.empty:
+        return False, "empty_retry_result"
+    work = matched.copy()
+    for column in ["found_rt", "area", "matched_peak_id"]:
+        work[column] = pd.to_numeric(work.get(column), errors="coerce")
+
+    key_codes = ["C20:5", "C22:6", "C22:5"]
+    for code in key_codes:
+        row = work[work["code"] == code]
+        if row.empty or not np.isfinite(row["area"].iloc[0]) or float(row["area"].iloc[0]) <= 0:
+            return False, f"key_peak_still_missing:{code}"
+
+    peak_ids = work["matched_peak_id"].dropna().astype(int)
+    if peak_ids.duplicated().any():
+        return False, "duplicate_peak_assignment_remains"
+
+    anchor = rt_profile.estimate_anchor_coefficient(work)
+    guarded_groups = [
+        ["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"],
+        ["C20:4N6", "C20:5", "C20:3N8"],
+        ["C22:6", "C22:5", "C22:4"],
+    ]
+    for codes in guarded_groups:
+        rows = work[work["code"].isin(codes)].set_index("code")
+        found_values = []
+        for code in codes:
+            if code not in rows.index:
+                continue
+            found_rt = float(rows.at[code, "found_rt"])
+            if not np.isfinite(found_rt):
+                continue
+            expected = rt_profile.expected_rt(code, anchor)
+            if abs(found_rt - expected) > 0.055:
+                return False, f"implausible_rt:{code}"
+            found_values.append(found_rt)
+        if len(found_values) >= 2 and np.any(np.diff(found_values) <= 0.006):
+            return False, "cluster_order_or_spacing_invalid"
+    return True, "strict_assignments_valid"
+
+
+def _with_structural_retry_note(result: dict, retry: dict) -> dict:
+    out = dict(result)
+    out["structural_retry"] = dict(retry)
+    confidence = dict(out.get("confidence", {}))
+    confidence["structural_retry"] = dict(retry)
+    reasons = list(confidence.get("reasons", []))
+    if retry.get("accepted"):
+        note = "Автоматическая перепроверка заново сопоставила пики и прошла строгий контроль."
+        confidence["button_text"] = "Готово после автоматической перепроверки"
+    else:
+        note = "Автоматическая перепроверка не исправила назначение пиков — решение оставлено оператору."
+    if note not in reasons:
+        reasons.insert(0, note)
+    confidence["reasons"] = reasons
+    out["confidence"] = confidence
+    return out
+
+
+def _retry_structural_stop(
+    dataframe: pd.DataFrame,
+    reference_targets: pd.DataFrame,
+    current_result: dict,
+) -> dict:
+    """Run exactly one stricter full rematch after a structural STOP."""
+    if not _is_structural_stop(current_result):
+        return current_result
+
+    current_mode = str(current_result.get("baseline_mode", ""))
+    try:
+        if not current_mode.startswith("asls") and signal.Baseline is not None:
+            retry_processed = signal.add_asls_baseline(dataframe)
+            retry_mode = "asls_structural_retry"
+        else:
+            retry_processed = signal.add_baseline(dataframe, **signal.BASELINE_KWARGS)
+            retry_mode = "chebyshev_structural_retry"
+        candidate = metrics.annotate_result(
+            process_from_baseline(retry_processed, reference_targets, strict_matching=True),
+            baseline_mode=retry_mode,
+        )
+        assignments_sane, reason = _strict_assignments_are_sane(candidate)
+        accepted = bool(assignments_sane and not _is_structural_stop(candidate))
+        retry = {
+            "attempted": True,
+            "accepted": accepted,
+            "baseline_mode": retry_mode,
+            "reason": reason,
+        }
+        if accepted:
+            return _with_structural_retry_note(candidate, retry)
+        return _with_structural_retry_note(current_result, retry)
+    except Exception as exc:
+        return _with_structural_retry_note(current_result, {
+            "attempted": True,
+            "accepted": False,
+            "baseline_mode": "retry_failed",
+            "reason": f"retry_exception:{type(exc).__name__}",
+        })
+
+
+def process_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
     processed = signal.add_baseline(dataframe, **signal.BASELINE_KWARGS)
     result = metrics.annotate_result(
         process_from_baseline(processed, reference_targets),
@@ -287,9 +343,9 @@ def process_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> d
             alt_result["cluster_quality_score"] >= signal.CLUSTER_QUALITY_COMPLETE_SCORE
             and alt_result["cluster_quality_score"] > result["cluster_quality_score"]
         ):
-            return alt_result
+            result = alt_result
 
-    return result
+    return _retry_structural_stop(dataframe, reference_targets, result)
 
 
 def process_file(

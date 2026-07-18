@@ -6,7 +6,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from . import legacy_fit, metrics, rt_profile
+from . import fit_recovery, metrics, rt_profile
 from .signal import (
     CHEMSTATION_INITIAL_AREA_REJECT,
     CHEMSTATION_INITIAL_THRESHOLD,
@@ -51,6 +51,8 @@ ENABLE_TARGET_RT_CORRIDOR_GUARD = os.environ.get("OMEGA_TARGET_RT_CORRIDOR_GUARD
 TARGET_RT_CORRIDOR_GUARD_CODES = {"C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0", "C20:4N6", "C20:5", "C20:3N8", "C22:6", "C22:5", "C22:4"}
 TARGET_RT_CORRIDOR_MIN_WIDTH = 0.004
 JUDGE_DECISIONS_ATTR = "judge_decisions"
+C20_ASSIGNMENT_TRACE_ATTR = "c20_assignment_trace"
+C20_IDENTITY_MAX_CENTER_DRIFT = 0.006
 SMALL_PEAK_SHARP_SEARCH_HALF_WINDOW = 0.070
 SMALL_PEAK_SHARP_APEX_SEARCH_RADIUS = 0.012
 SMALL_PEAK_SHARP_THRESHOLD_FRACTION = 0.08
@@ -100,6 +102,91 @@ def _recompute_matched_percent_area(matched_targets: pd.DataFrame) -> pd.DataFra
         out["percent_area"] = 100.0 * pd.to_numeric(out["area"], errors="coerce") / total_area
     else:
         out["percent_area"] = np.nan
+    return out
+
+
+def _c20_identity_lock_after_fit(
+    before_fit: pd.DataFrame,
+    fitted: pd.DataFrame,
+    peaks_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Keep a C20 fit inside the Voronoi cell of its assigned physical peak."""
+    if before_fit is None or before_fit.empty or fitted is None or fitted.empty:
+        return fitted
+    before_row = before_fit[before_fit["code"] == "C20:5"]
+    fitted_row = fitted[fitted["code"] == "C20:5"]
+    if before_row.empty or fitted_row.empty:
+        return fitted
+
+    locked_rt = pd.to_numeric(before_row["found_rt"], errors="coerce").iloc[0]
+    proposed_rt = pd.to_numeric(fitted_row["found_rt"], errors="coerce").iloc[0]
+    peak_id = pd.to_numeric(before_row["matched_peak_id"], errors="coerce").iloc[0]
+    if not (np.isfinite(locked_rt) and np.isfinite(proposed_rt)):
+        return fitted
+
+    physical_rt = float(locked_rt)
+    if peaks_df is not None and not peaks_df.empty and np.isfinite(peak_id):
+        physical_peak = peaks_df[pd.to_numeric(peaks_df["peak_id"], errors="coerce") == int(peak_id)]
+        if not physical_peak.empty:
+            physical_rt = float(pd.to_numeric(physical_peak["apex_x"], errors="coerce").iloc[0])
+
+    lower = physical_rt - C20_IDENTITY_MAX_CENTER_DRIFT
+    upper = physical_rt + C20_IDENTITY_MAX_CENTER_DRIFT
+    if peaks_df is not None and not peaks_df.empty:
+        apexes = pd.to_numeric(peaks_df["apex_x"], errors="coerce").to_numpy(dtype=float)
+        apexes = np.sort(apexes[np.isfinite(apexes)])
+        distinct = apexes[np.abs(apexes - physical_rt) > 0.003]
+        left = distinct[distinct < physical_rt]
+        right = distinct[distinct > physical_rt]
+        if left.size:
+            lower = max(lower, 0.5 * (float(left[-1]) + physical_rt))
+        if right.size:
+            upper = min(upper, 0.5 * (physical_rt + float(right[0])))
+
+    accepted = bool(lower <= float(proposed_rt) <= upper)
+    trace = list(before_fit.attrs.get(C20_ASSIGNMENT_TRACE_ATTR, []))
+    trace.append({
+        "stage": "c20_fit_identity_lock",
+        "code": "C20:5",
+        "matched_peak_id": None if not np.isfinite(peak_id) else int(peak_id),
+        "locked_rt": physical_rt,
+        "proposed_rt": float(proposed_rt),
+        "lower_rt": float(lower),
+        "upper_rt": float(upper),
+        "decision": "accepted" if accepted else "rejected_neighbor_jump",
+    })
+    out = fitted.copy()
+    if not accepted:
+        row_idx = int(out.index[out["code"] == "C20:5"][0])
+        out.at[row_idx, "identity_apex_rt"] = physical_rt
+        out.at[row_idx, "identity_matched_peak_id"] = before_row["matched_peak_id"].iloc[0]
+        out.at[row_idx, "identity_match_score"] = before_row["match_score"].iloc[0]
+        previous_status = str(out.at[row_idx, "status"] or "")
+        if "identity_center_locked" not in previous_status:
+            out.at[row_idx, "status"] = f"{previous_status}_identity_center_locked".strip("_")
+    out.attrs[C20_ASSIGNMENT_TRACE_ATTR] = trace
+    return out
+
+
+def _apply_c20_display_identity(matched_targets: pd.DataFrame) -> pd.DataFrame:
+    """Restore the assigned physical apex after all numerical refinements."""
+    out = matched_targets.copy()
+    if "identity_apex_rt" not in out.columns:
+        return out
+    rows = out.index[
+        (out["code"] == "C20:5")
+        & pd.to_numeric(out["identity_apex_rt"], errors="coerce").notna()
+    ].tolist()
+    for row_idx in rows:
+        out.at[row_idx, "found_rt"] = float(out.at[row_idx, "identity_apex_rt"])
+        identity_peak_id = pd.to_numeric(
+            pd.Series([out.at[row_idx, "identity_matched_peak_id"]]), errors="coerce"
+        ).iloc[0]
+        identity_score = pd.to_numeric(
+            pd.Series([out.at[row_idx, "identity_match_score"]]), errors="coerce"
+        ).iloc[0]
+        out.at[row_idx, "matched_peak_id"] = identity_peak_id
+        out.at[row_idx, "match_score"] = identity_score
     return out
 
 
@@ -1817,13 +1904,16 @@ def refine_cluster_matches(
     matched_targets = refine_overlapped_c22_cluster_areas(processed, peaks, matched_targets)
     matched_targets = refine_cluster_areas_by_local_valleys(processed, matched_targets)
     matched_targets = recover_single_missing_c22_by_local_bounds(processed, matched_targets)
-    matched_targets = legacy_fit.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
-    matched_targets = legacy_fit.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
-    matched_targets = legacy_fit.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
+    before_c20_fit = matched_targets.copy()
+    c20_fit = fit_recovery.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
+    matched_targets = _c20_identity_lock_after_fit(before_c20_fit, c20_fit, peaks)
+    matched_targets = fit_recovery.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)
     matched_targets = tighten_overwide_c22_cluster_tails(processed, matched_targets)
-    matched_targets = legacy_fit.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
+    matched_targets = fit_recovery.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
     matched_targets = refine_small_peak_integrations(processed, matched_targets)
     matched_targets = expand_final_peak_boundaries(processed, matched_targets)
     matched_targets = tighten_dpa_overintegration_by_local_bounds(processed, matched_targets)
     matched_targets = enforce_target_rt_corridors(processed, matched_targets)
+    matched_targets = _apply_c20_display_identity(matched_targets)
     return peaks, matched_targets

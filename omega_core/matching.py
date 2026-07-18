@@ -10,6 +10,7 @@ RELIABLE_RT_WINDOW = 0.035
 RELIABLE_RT_DOMINANT_DISTANCE_MAX = 0.025
 RELIABLE_RT_DOMINANT_AREA_MULTIPLIER = 8.0
 RELIABLE_RT_DOMINANT_AREA_MIN_DELTA = 400.0
+STRICT_SOFT_RT_WINDOW = 0.080
 
 # C18:3N6 is a small, optional peak immediately before the four-peak C18
 # cluster.  If it is absent, a nearest-peak fallback must not let it consume
@@ -269,7 +270,11 @@ def apply_c22_cluster_override(
     return out
 
 
-def match_targets_to_peaks(targets_df: pd.DataFrame, peaks_df: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+def match_targets_to_peaks(
+    targets_df: pd.DataFrame,
+    peaks_df: pd.DataFrame,
+    strict: bool = False,
+) -> tuple[pd.DataFrame, float]:
     targets = targets_df.sort_values("order_index").reset_index(drop=True)
     if peaks_df is None or peaks_df.empty:
         out = targets.copy()
@@ -305,7 +310,7 @@ def match_targets_to_peaks(targets_df: pd.DataFrame, peaks_df: pd.DataFrame) -> 
             continue
         local_positions = candidate_positions[distances[candidate_positions] <= RELIABLE_RT_WINDOW]
         if local_positions.size == 0:
-            if str(out.at[i, "code"]) in NO_NEAREST_FALLBACK_CODES:
+            if strict or str(out.at[i, "code"]) in NO_NEAREST_FALLBACK_CODES:
                 continue
             best_pos = int(candidate_positions[np.argmin(distances[candidate_positions])])
             best_distance = float(distances[best_pos])
@@ -327,13 +332,19 @@ def match_targets_to_peaks(targets_df: pd.DataFrame, peaks_df: pd.DataFrame) -> 
             continue
         best_pos = int(min(candidate_positions.tolist(), key=lambda pos: (float(distances[pos]), int(pos))))
         best_distance = float(distances[best_pos])
-        if best_distance > 0.2:
+        max_soft_distance = STRICT_SOFT_RT_WINDOW if strict else 0.2
+        if best_distance > max_soft_distance:
             continue
         used_mask[best_pos] = True
         _assign_peak(out, i, peaks.iloc[best_pos], "matched_soft_rt", best_distance)
 
     order_rows = out.index[out["corrected_target_rt"].isna()].tolist()
     for i in order_rows:
+        if strict:
+            # An order-only target has no independent RT evidence.  In the
+            # safety retry it may only be assigned by a guarded cluster rule
+            # below, never to the first unrelated peak in a broad interval.
+            continue
         lower, upper = _get_order_bounds(out, i)
         candidate_positions = np.flatnonzero((~used_mask) & (peak_apex > lower) & (peak_apex < upper))
         if candidate_positions.size == 0:

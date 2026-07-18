@@ -1,51 +1,33 @@
-# Safety judge for large omega misses
+# Safety judge for errors above 0.5
 
-This layer is a reference-free evaluator for the current engine. It does **not**
-change the omega number. Its job is to catch samples that look like the known
-large failures (`abs(delta) > 0.5`) before they are silently accepted.
+The production judge is reference-free and does not change the calculated omega
+value. Its only hard target is to send every known integration error above 0.5
+percentage point to manual review.
 
-## Training target
+## Current validation set
 
-The current regression corpus has 286 evaluated samples and 9 samples outside the
-clinical tolerance band `±0.5`. The judge was tuned against those failures using
-only runtime features: C22/DHA/DPA integration geometry, C22 area ratios,
-confidence, baseline mode, and existing cluster/refinement status.
+- 411 evaluated chromatograms from 17 non-sealed batch dates;
+- 34 errors above 0.5 with the current integration engine;
+- `14072026` remains sealed and was not used for thresholds or validation.
 
-## Current rule family
+## Rules
 
-The high-risk class is intentionally narrow. It fires on repeated C22/C20 geometry
-patterns seen in the scary samples:
+Structural failures (missing key peaks or one signal assigned to several peaks)
+produce a stop warning. Three conservative C20/C22 geometry envelopes produce a
+manual-review warning. They use only peak positions, widths, asymmetry, and the
+existing C22 overlap state available in the GUI. The user-facing message names
+the peaks to inspect; numeric thresholds stay in `omega_core/metrics.py`.
 
-1. Low DPA-to-C22:4 ratio with asymmetric DHA integration.
-2. High DPA-to-C22:4 ratio combined with low DHA area and omega above the low-end
-   guard threshold.
-3. A low-confidence C20 shape exception observed in one remaining over-estimate.
+The old general confidence penalties remain as context, but low confidence alone
+does not create a high-error warning.
 
-Small supporting penalties are added for fallback baseline, low/medium confidence,
-and existing cluster fit/overlap reasons. These supporting signals cannot create a
-high-risk decision alone; they only raise confidence once a learned geometry pattern
-has already fired.
+## Measured behavior
 
-## Current measured behavior
+On the corrected historical set, the high-risk bands catch 34/34 known errors
+above 0.5. They mark 105/411 samples for review, including 71/377 samples that are
+inside the tolerance band (18.8% of normal samples). This false-warning rate is
+the deliberate cost of the requested 100% historical recall.
 
-On the current corpus, `HIGH_RISK_GT_0_5` catches all 9 known `>0.5` misses while
-marking 16/286 samples for focused review. That is intentionally much narrower than
-the older general `review_flag`, which is conservative but too broad to be useful
-as a triage queue.
-
-The low-risk band currently has zero `>0.5` misses in this corpus, but this is not a
-formal guarantee on new unseen data. Treat it as a practical triage layer until we
-have enough independent future batches to validate it.
-
-## Experimental selector mode
-
-`omega_regression.py --selector-mode safety` now evaluates the existing baseline
-variants and chooses without using the manual reference. The selector prefers the
-lowest safety-judge score, then higher confidence, then lower strict/final spread,
-with the current pipeline winning ties.
-
-This mode is deliberately **not** the default yet. A first old-corpus probe showed
-that naive safety-based variant switching can move risk instead of reducing it: it
-may avoid one known shape pattern while choosing a baseline variant with a worse
-absolute delta. Keep it as an experiment until it beats the default on the full
-extracted corpus, not just on individual scary samples.
+This is a measured historical result, not a mathematical guarantee for unseen
+batches. New manually checked dates should be appended to the regression set and
+the same 100% recall audit rerun before any threshold is narrowed.

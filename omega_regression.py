@@ -21,10 +21,9 @@ DEFAULT_REFERENCE_PATH = PROJECT_DIR / "reference_targets_reverted_c22fixed.json
 OLD45_DATES = {"13032026", "14012026", "20032026"}
 SAMPLE_NAME_RE = re.compile(r"^O(?P<instrument_no>\d+)_(?P<sample_id>\d+)\.D$", re.IGNORECASE)
 
-# Known special case from the 03072026 instrument export: O1 is a blank/empty
-# sample, so a position-only workbook would need +1 indexing. ID-based matching
-# is still preferred whenever sample IDs are available.
-POSITION_INDEX_OFFSETS = {"03072026": 1}
+# Known special case from the 03072026 instrument export: after an empty O1
+# injection, printed IDs and actual signal sequence are offset.  Only acquisition
+# position produces the verified manual/calculated pairing for this date.
 POSITION_MATCH_DATES = {"03072026"}
 OMEGA_CODES = ("C20:5", "C22:5", "C22:6", "C20:3N8", "C22:4", "C18:1N9C", "C18:2N6C", "C18:3N3")
 DIAGNOSTIC_TARGET_CODES = ("C20:5", "C20:3N8", "C20:4N6", "C22:6", "C22:5", "C22:4", "C18:1N9C", "C18:2N6C", "C18:3N3")
@@ -66,21 +65,46 @@ def load_excel_refs(xlsx_path: Path) -> list[ExcelReference]:
     raw = pd.read_excel(xlsx_path, header=None)
     refs: list[ExcelReference] = []
     for excel_idx, row in enumerate(raw.itertuples(index=False), start=1):
-        sample_token = None
-        ref_value = None
-        for value in row:
+        numeric_cells: list[tuple[int, float]] = []
+        instrument_tokens: list[tuple[int, int]] = []
+        for column_idx, value in enumerate(row):
             if pd.isna(value):
                 continue
-            if sample_token is None:
-                text = str(value).strip()
-                if text.isdigit():
-                    sample_token = int(text)
-                    continue
-            if ref_value is None:
-                try:
-                    ref_value = float(str(value).strip().replace(",", "."))
-                except ValueError:
-                    pass
+            text = str(value).strip()
+            instrument_match = re.fullmatch(r"O(\d+)", text, flags=re.IGNORECASE)
+            if instrument_match:
+                instrument_tokens.append((column_idx, int(instrument_match.group(1))))
+            try:
+                numeric_cells.append((column_idx, float(text.replace(" ", "").replace(",", "."))))
+            except ValueError:
+                continue
+
+        # Prefer the long laboratory sample ID. Some workbooks have a leading
+        # numeric injection index (1, 2, 3, ...), which must not be mistaken
+        # for either the sample ID or the manual omega value.
+        id_cells = [
+            (column_idx, int(value))
+            for column_idx, value in numeric_cells
+            if float(value).is_integer() and abs(value) > 1000
+        ]
+        if id_cells:
+            sample_column, sample_token = id_cells[0]
+        elif instrument_tokens:
+            sample_column, sample_token = instrument_tokens[0]
+        else:
+            integer_cells = [
+                (column_idx, int(value))
+                for column_idx, value in numeric_cells
+                if float(value).is_integer() and value > 0
+            ]
+            if not integer_cells:
+                continue
+            sample_column, sample_token = integer_cells[0]
+
+        ref_value = next(
+            (value for column_idx, value in numeric_cells if column_idx > sample_column),
+            None,
+        )
         if sample_token is not None and ref_value is not None:
             refs.append(ExcelReference(excel_idx, len(refs) + 1, sample_token, ref_value))
     return refs
@@ -114,14 +138,19 @@ def build_batch_records(csv_path: Path) -> list[BatchRecord]:
 
 
 def resolve_batch(ref: ExcelReference, batches: list[BatchRecord], date: str) -> tuple[BatchRecord | None, str]:
+    by_sample_id = {batch.sample_id: batch for batch in batches if batch.sample_id is not None}
+    by_instrument_no = {batch.instrument_no: batch for batch in batches if batch.instrument_no is not None}
+
+    # The 03072026 export starts with an empty injection O1.  ChemStation then
+    # wrote the first non-empty chromatogram under the following O-number/ID,
+    # while the manual workbook retained the original sequence.  Matching the
+    # printed IDs therefore shifts every reference by one sample.  Position in
+    # the acquisition sequence is the only valid key for this one known file.
     if date in POSITION_MATCH_DATES:
         batch_index = ref.ordinal - 1
         if 0 <= batch_index < len(batches):
-            return batches[batch_index], "position_date_override"
-        return None, "missing_position_date_override"
-
-    by_sample_id = {batch.sample_id: batch for batch in batches if batch.sample_id is not None}
-    by_instrument_no = {batch.instrument_no: batch for batch in batches if batch.instrument_no is not None}
+            return batches[batch_index], "position_after_empty_injection"
+        return None, "missing_position_after_empty_injection"
 
     if ref.token > 1000:
         matched = by_sample_id.get(ref.token)
@@ -133,7 +162,7 @@ def resolve_batch(ref: ExcelReference, batches: list[BatchRecord], date: str) ->
     if matched is not None:
         return matched, "instrument_no"
 
-    batch_index = ref.token - 1 + POSITION_INDEX_OFFSETS.get(date, 0)
+    batch_index = ref.token - 1
     if 0 <= batch_index < len(batches):
         return batches[batch_index], "position"
     return None, "missing_position"
@@ -194,6 +223,15 @@ def _extract_result_features(result: dict) -> dict:
         elif isinstance(value, (int, float, np.integer, np.floating)):
             features[f"omega_{key}"] = _safe_float(value)
     if isinstance(matched, pd.DataFrame):
+        matched_peak_ids = pd.to_numeric(
+            matched["matched_peak_id"]
+            if "matched_peak_id" in matched
+            else pd.Series(dtype=float),
+            errors="coerce",
+        ).dropna()
+        features["matched_peak_id_duplicates"] = int(
+            max(0, len(matched_peak_ids) - matched_peak_ids.nunique())
+        )
         for code in DIAGNOSTIC_TARGET_CODES:
             slug = code.replace(":", "_").replace("/", "_")
             row = _target_row(matched, code)
@@ -381,71 +419,36 @@ def _legacy_safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
 
 
 def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
-    """Estimate integration risk from explicit, inspectable failure modes.
+    """Return the same high-recall warning used by the production GUI."""
+    missing_key_peaks = []
+    for code in ["C20_5", "C22_6", "C22_5"]:
+        area = _safe_float(row.get(f"{code}_area"))
+        status = str(row.get(f"{code}_status", ""))
+        if (not np.isfinite(area)) or area <= 0 or "not_found" in status:
+            missing_key_peaks.append(code.replace("_", ":", 1))
 
-    The score means *risk of a structurally unreliable integration*, not whether
-    the reported omega value is high or low.  Direction is reported only where
-    the chromatographic failure has a defensible direction.
-    """
-    reasons: list[str] = []
-    risk_score = 0
-    predicted_direction = "unknown"
+    duplicate_peak_codes = []
+    if int(_safe_float(row.get("matched_peak_id_duplicates"), 0.0)) > 0:
+        duplicate_peak_codes = ["назначения пиков"]
 
-    confidence = _safe_float(row.get("confidence"))
-    cluster_quality = _safe_float(row.get("cluster_quality_score"))
-    dha = _safe_float(row.get("omega_dha_area"))
-    strict = _safe_float(row.get("omega_omega3_trio_strict"))
-    final = _safe_float(row.get("omega_omega3_trio", row.get("calculated")))
-    spread = abs(final - strict) if np.isfinite(final) and np.isfinite(strict) else np.nan
+    features = dict(row)
+    features["missing_key_peaks"] = missing_key_peaks
+    features["duplicate_peak_codes"] = duplicate_peak_codes
+    risk = metrics.classify_high_error_risk(features)
 
-    c18_1_area = _safe_float(row.get("C18_1N9C_area"))
-    c18_3_area = _safe_float(row.get("C18_3N3_area"))
-    c18_1_rt = _safe_float(row.get("C18_1N9C_found_rt"))
-    c18_3_rt = _safe_float(row.get("C18_3N3_found_rt"))
-    c18_duplicate = bool(
-        np.all(np.isfinite([c18_1_area, c18_3_area, c18_1_rt, c18_3_rt]))
-        and abs(c18_1_rt - c18_3_rt) <= 0.002
-        and abs(c18_1_area - c18_3_area) <= 0.001 * max(c18_1_area, c18_3_area, 1.0)
-    )
-
-    c22_status = " ".join(
-        str(row.get(f"{code}_status", "")) for code in ["C22_6", "C22_5", "C22_4"]
-    )
-    if (np.isfinite(dha) and dha <= 0) or "not_found" in str(row.get("C22_6_status", "")):
-        risk_score = max(risk_score, 96)
-        predicted_direction = "likely_under_missing_dha"
-        reasons.append("missing_key_peak_dha")
-
-    if c18_duplicate:
-        risk_score = max(risk_score, 92)
-        predicted_direction = "denominator_identity_conflict"
-        reasons.append("duplicate_c18_component_assignment")
-
-    if np.isfinite(cluster_quality) and cluster_quality < 40:
-        risk_score = max(risk_score, 58)
-        reasons.append("cluster_identity_incomplete")
-    if np.isfinite(spread) and spread > 0.65:
-        risk_score = max(risk_score, 58)
-        reasons.append("large_strict_final_correction")
-
-    if np.isfinite(confidence) and confidence < 40:
-        risk_score = max(risk_score, 55)
-        reasons.append("low_peak_quality_score")
-
-    if "fit" in c22_status or "overlap" in c22_status:
-        risk_score = max(risk_score, 30)
-        reasons.append("c22_fit_or_overlap")
-
-    risk_score = int(min(100, risk_score))
-    if risk_score >= 85:
-        band = "HIGH_RISK_STRUCTURAL"
-    elif risk_score >= 55:
-        band = "MANUAL_REVIEW"
-    elif risk_score >= 30:
-        band = "WATCH_GEOMETRY"
+    reason_codes = list(risk.get("reason_codes", []))
+    if "missing_key_peak" in reason_codes:
+        direction = "likely_under_missing_peak"
+    elif "duplicate_peak_assignment" in reason_codes:
+        direction = "identity_conflict"
     else:
-        band = "LOW_RISK"
-    return risk_score, band, predicted_direction, ",".join(dict.fromkeys(reasons))
+        direction = "unknown"
+    return (
+        int(risk.get("score", 0)),
+        str(risk.get("band", "LOW_RISK")),
+        direction,
+        ",".join(reason_codes),
+    )
 
 def _annotated_from_processed(processed: pd.DataFrame, reference_targets: pd.DataFrame, baseline_mode: str) -> dict:
     return metrics.annotate_result(pipeline.process_from_baseline(processed, reference_targets), baseline_mode=baseline_mode)
@@ -522,16 +525,23 @@ def build_audit_row(date: str, xlsx_path: Path, csv_path: Path, refs: list[Excel
     ref_tokens = {ref.token for ref in refs}
     batch_ids = {batch.sample_id for batch in batches if batch.sample_id is not None}
     matched_by_id = len({token for token in ref_tokens if token > 1000 and token in batch_ids})
+    positional_override = date in POSITION_MATCH_DATES
     return {
         "date": date,
         "xlsx_path": str(xlsx_path),
         "csv_path": str(csv_path),
         "reference_rows": len(refs),
         "instrument_batches": len(batches),
-        "matched_by_sample_id": matched_by_id,
+        "match_strategy": "acquisition_position" if positional_override else "sample_id_then_position",
+        "matched_by_sample_id": 0 if positional_override else matched_by_id,
+        "matched_by_position": min(len(refs), len(batches)) if positional_override else 0,
         "reference_id_rows": sum(1 for token in ref_tokens if token > 1000),
         "position_rows": sum(1 for token in ref_tokens if token <= 1000),
-        "missing_reference_ids": max(0, sum(1 for token in ref_tokens if token > 1000 and token not in batch_ids)),
+        "missing_reference_ids": (
+            max(0, len(refs) - len(batches))
+            if positional_override
+            else max(0, sum(1 for token in ref_tokens if token > 1000 and token not in batch_ids))
+        ),
     }
 
 

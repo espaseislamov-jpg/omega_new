@@ -12,5 +12,3 @@ dependencies:
   - pybaselines>=1.2,<2
   - lmfit>=1.3,<2
   - pyopenms>=3.2,<4
-  - scikit-learn>=1.5,<2
-  - hdbscan>=0.8.40,<0.9

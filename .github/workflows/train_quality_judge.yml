@@ -1,0 +1,59 @@
+name: Train neural quality judge
+
+on:
+  workflow_dispatch:
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      OMP_NUM_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    steps:
+      - name: Check out work branch
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install runtime and training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-training.txt
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Export reference-free integration features
+        run: |
+          python scripts/export_quality_dataset.py \
+            --data-dir data/regression \
+            --output artifacts/quality_dataset.csv \
+            --include-variants
+
+      - name: Train with grouped out-of-fold validation
+        run: |
+          python scripts/train_quality_mlp.py \
+            --dataset artifacts/quality_dataset.csv \
+            --output-dir artifacts/quality_judge \
+            --device cpu
+
+      - name: Publish validation summary
+        run: |
+          echo "## Neural quality-judge validation" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat artifacts/quality_judge/quality_judge_report.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload dataset, predictions, and frozen model
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omega-quality-judge-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 30

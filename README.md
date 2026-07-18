@@ -81,7 +81,7 @@ Large local archives, extracted data folders, and debug folders are intentionall
 
 ## Build omega_v2 executable
 
-`omega_v2.py` is the bootstrap launcher for the GUI. When it is started from source on a machine with Python 3.10+, it checks the required Python packages and installs missing dependencies from `requirements.txt` / `requirements-chromatopy.txt` before launching `New_idea.py`.
+`omega_v2.py` is the bootstrap launcher for the GUI. When it is started from source on a machine with Python 3.10+, it checks the required Python packages and installs missing dependencies from `requirements.txt` before launching `New_idea.py`. Experimental judge-training tools use the separate `requirements-training.txt` file and are not bundled into the desktop application.
 
 Build the distributable app with PyInstaller:
 
@@ -113,6 +113,6 @@ For a non-programmer workflow, use the GitHub Actions artifact:
 4. Press **Run workflow** on branch `work`.
 5. Wait until the run becomes green.
 6. Open the finished run and download artifact **omega_v2_windows_setup**.
-7. Unzip it and run `omega_v2_setup.exe`.
+7. Unzip it and run `omega_v2.6_setup.exe`.
 
 The workflow also uploads **omega_v2_windows_portable** if you want the raw portable folder without installer.
