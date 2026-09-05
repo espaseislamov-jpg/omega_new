@@ -9,6 +9,7 @@ import pandas as pd
 from scipy.signal import find_peaks, peak_widths, savgol_filter
 from scipy.stats import median_abs_deviation
 
+from . import rt_profile
 from .io import get_runtime_app_dir
 
 try:
@@ -227,21 +228,38 @@ def _find_targeted_peak_candidate(
     return best
 
 
-def augment_targeted_cluster_peaks(df: pd.DataFrame, peaks_df: pd.DataFrame) -> pd.DataFrame:
+def augment_targeted_cluster_peaks(
+    df: pd.DataFrame,
+    peaks_df: pd.DataFrame,
+    reference_targets: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     if df is None or df.empty:
         return peaks_df
 
     noise = max(_robust_sigma(df["y_corrected"].to_numpy(dtype=float)), 1.0)
+    codes = [
+        "C18:1N9C", "C18:3N3", "C18:0",
+        "C20:4N6", "C20:5", "C20:3N8",
+        "C22:6", "C22:5", "C22:4",
+    ]
+    fallback_centers = [7.623, 7.650, 7.750, 8.381, 8.410, 8.467, 9.252, 9.285, 9.316]
+    centers = rt_profile.target_centers(
+        reference_targets, codes, fallback_centers, corrected=False
+    ) if reference_targets is not None else fallback_centers
+    settings = [
+        (0.018, max(8.0 * noise, 1200.0), 120.0),
+        (0.020, max(6.0 * noise, 900.0), 120.0),
+        (0.020, max(8.0 * noise, 1200.0), 120.0),
+        (0.018, max(8.0 * noise, 1200.0), 120.0),
+        (0.018, max(5.0 * noise, 700.0), 80.0),
+        (0.020, max(5.0 * noise, 700.0), 80.0),
+        (0.018, max(2.0 * noise, 250.0), 20.0),
+        (0.018, max(2.0 * noise, 220.0), 20.0),
+        (0.018, max(2.0 * noise, 220.0), 20.0),
+    ]
     specs = [
-        {"target_x": 7.623, "search_radius": 0.018, "min_prominence": max(8.0 * noise, 1200.0), "min_area": 120.0},
-        {"target_x": 7.650, "search_radius": 0.020, "min_prominence": max(6.0 * noise, 900.0), "min_area": 120.0},
-        {"target_x": 7.750, "search_radius": 0.020, "min_prominence": max(8.0 * noise, 1200.0), "min_area": 120.0},
-        {"target_x": 8.381, "search_radius": 0.018, "min_prominence": max(8.0 * noise, 1200.0), "min_area": 120.0},
-        {"target_x": 8.410, "search_radius": 0.018, "min_prominence": max(5.0 * noise, 700.0), "min_area": 80.0},
-        {"target_x": 8.467, "search_radius": 0.020, "min_prominence": max(5.0 * noise, 700.0), "min_area": 80.0},
-        {"target_x": 9.252, "search_radius": 0.018, "min_prominence": max(2.0 * noise, 250.0), "min_area": 20.0},
-        {"target_x": 9.285, "search_radius": 0.018, "min_prominence": max(2.0 * noise, 220.0), "min_area": 20.0},
-        {"target_x": 9.316, "search_radius": 0.018, "min_prominence": max(2.0 * noise, 220.0), "min_area": 20.0},
+        {"target_x": center, "search_radius": radius, "min_prominence": prominence, "min_area": area}
+        for center, (radius, prominence, area) in zip(centers, settings)
     ]
 
     extra_records = []
@@ -518,6 +536,7 @@ def add_smoothing_and_derivatives(
 def detect_peak_candidates(
     df: pd.DataFrame,
     best_window=None,
+    reference_targets: pd.DataFrame | None = None,
     height_sigma: float = PEAK_DETECTION_HEIGHT_SIGMA,
     prominence_sigma: float = PEAK_DETECTION_PROMINENCE_SIGMA,
     rel_height: float = PEAK_INTEGRATION_REL_HEIGHT,
@@ -625,7 +644,7 @@ def detect_peak_candidates(
     total_area = float(peaks_df["area"].sum())
     peaks_df["percent_area"] = 100.0 * peaks_df["area"] / total_area if total_area > 0 else np.nan
 
-    peaks_df = augment_targeted_cluster_peaks(df, peaks_df)
+    peaks_df = augment_targeted_cluster_peaks(df, peaks_df, reference_targets=reference_targets)
     pyopenms_peaks_df = detect_peaks_with_pyopenms(df)
     if not pyopenms_peaks_df.empty:
         peaks_df = _merge_peak_records(peaks_df, pyopenms_peaks_df.to_dict("records"))

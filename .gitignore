@@ -10,4 +10,6 @@ build/
 dist/
 installer_output/
 artifacts/
+omega_instrument_profiles.json
+*.omega-profile.json
 *.spec.bak

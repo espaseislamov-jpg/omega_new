@@ -13,6 +13,8 @@ import pandas as pd
 from scipy.optimize import least_squares
 from scipy.stats import median_abs_deviation
 
+from . import rt_profile
+
 try:
     from lmfit.models import LinearModel, PseudoVoigtModel
 except Exception:
@@ -259,6 +261,11 @@ def refine_overwide_c22_cluster_with_pvfit(
         return out
 
     previous_flag = ENABLE_SPLIT_PSEUDOVOIGT_CLUSTER_FIT
+    fallback_centers = [9.247, 9.280, 9.310]
+    profile_centers = rt_profile.target_centers(out, c22_codes, fallback_centers, corrected=True)
+    window_left, window_right = rt_profile.shifted_window(
+        out, c22_codes, fallback_centers, 9.22, 9.33
+    )
     try:
         globals()["ENABLE_SPLIT_PSEUDOVOIGT_CLUSTER_FIT"] = True
         fit_out, delta_area = _refine_cluster_with_deconvolution(
@@ -266,9 +273,9 @@ def refine_overwide_c22_cluster_with_pvfit(
             peaks_df=peaks_df,
             matched_targets_df=out,
             cluster_codes=c22_codes,
-            default_centers=[9.247, 9.280, 9.310],
-            window_left=9.22,
-            window_right=9.33,
+            default_centers=profile_centers,
+            window_left=window_left,
+            window_right=window_right,
             center_tolerances=[0.010, 0.010, 0.010],
             status="matched_c22_pvfit_tail",
         )
@@ -1154,6 +1161,150 @@ def _refine_cluster_with_deconvolution(
     return out, fitted_area_sum - previous_area_sum
 
 
+def _recover_missing_epa_component_only(
+    df: pd.DataFrame,
+    matched_targets_df: pd.DataFrame,
+    cluster_codes,
+    initial_centers,
+    window_left: float,
+    window_right: float,
+    center_tolerances,
+) -> pd.DataFrame:
+    """Recover an unresolved EPA component without rewriting its two flanks.
+
+    The ordinary three-component refinement is deliberately guarded by the
+    total fitted/previous area ratio.  That guard is useful when all three
+    components were already integrated, but it prevented recovery when EPA was
+    absent: the fit's model areas for the two large flanks need not equal their
+    already accepted valley-integrated areas.  In the missing-EPA case we use
+    the fit only to isolate the middle component and leave both flank areas
+    untouched.
+    """
+    out = matched_targets_df.copy()
+    cluster = out[out["code"].isin(cluster_codes)].set_index("code")
+    if len(cluster) != len(cluster_codes):
+        return out
+
+    initial_areas = []
+    for code in cluster_codes:
+        area = pd.to_numeric(pd.Series([cluster.at[code, "area"]]), errors="coerce").iloc[0]
+        initial_areas.append(float(area) if np.isfinite(area) and float(area) > 0 else np.nan)
+
+    fit, fit_meta = _fit_cluster_components(
+        df=df,
+        initial_centers=initial_centers,
+        window_left=window_left,
+        window_right=window_right,
+        center_tolerances=center_tolerances,
+        initial_areas=initial_areas,
+    )
+    if fit is None or len(fit) != len(cluster_codes):
+        return out
+
+    epa_idx = list(cluster_codes).index("C20:5")
+    component = fit[epa_idx]
+    center = float(component.get("center", np.nan))
+    predicted_center = float(initial_centers[epa_idx])
+    left_rt = float(cluster.at[cluster_codes[epa_idx - 1], "found_rt"])
+    right_rt = float(cluster.at[cluster_codes[epa_idx + 1], "found_rt"])
+    if not (
+        np.isfinite(center)
+        and left_rt < center < right_rt
+        and abs(center - predicted_center) <= float(center_tolerances[epa_idx]) + 1e-6
+    ):
+        return out
+
+    use_split_pv = all(
+        "fwhm_left" in item and "fwhm_right" in item and "eta" in item
+        for item in fit
+    )
+    if use_split_pv:
+        boundaries = _derive_split_pseudovoigt_boundaries(
+            df=df,
+            fitted_components=fit,
+            window_left=window_left,
+            window_right=window_right,
+        )
+    elif all("fwhm" in item and "eta" in item for item in fit):
+        boundaries = _derive_pseudo_voigt_boundaries(
+            fit,
+            x_left=window_left,
+            x_right=window_right,
+        )
+    else:
+        boundaries = _derive_fit_component_boundaries(
+            fit,
+            window_left=window_left,
+            window_right=window_right,
+        )
+    if len(boundaries) != len(cluster_codes):
+        return out
+
+    left_end = pd.to_numeric(
+        pd.Series([cluster.at[cluster_codes[epa_idx - 1], "integration_end_x"]]),
+        errors="coerce",
+    ).iloc[0]
+    right_start = pd.to_numeric(
+        pd.Series([cluster.at[cluster_codes[epa_idx + 1], "integration_start_x"]]),
+        errors="coerce",
+    ).iloc[0]
+    start_x, end_x = map(float, boundaries[epa_idx])
+    if np.isfinite(left_end):
+        start_x = max(start_x, float(left_end))
+    if np.isfinite(right_start):
+        end_x = min(end_x, float(right_start))
+    if not (start_x < center < end_x):
+        return out
+
+    x_col = _get_x_column_name(df)
+    x = df[x_col].to_numpy(dtype=float)
+    mask = (x >= start_x) & (x <= end_x)
+    if int(np.count_nonzero(mask)) < 4:
+        return out
+    local_x = x[mask]
+    if use_split_pv:
+        curve = float(component["area"]) * _split_pseudo_voigt_unit_area(
+            local_x,
+            center=center,
+            fwhm_left=float(component["fwhm_left"]),
+            fwhm_right=float(component["fwhm_right"]),
+            eta=float(component["eta"]),
+        )
+    elif "fwhm" in component and "eta" in component:
+        curve = float(component["area"]) * _pseudo_voigt_unit_area(
+            local_x,
+            center=center,
+            fwhm=float(component["fwhm"]),
+            eta=float(component["eta"]),
+        )
+    else:
+        curve = _gaussian_component(
+            local_x,
+            amplitude=float(component["amplitude"]),
+            center=center,
+            sigma=float(component["sigma"]),
+        )
+    area = float(np.trapezoid(curve, local_x))
+    if not np.isfinite(area) or area <= 5.0 or not np.any(curve > 0):
+        return out
+
+    row_idx = out.index[out["code"] == "C20:5"][0]
+    out.at[row_idx, "found_rt"] = center
+    out.at[row_idx, "area"] = area
+    out.at[row_idx, "integration_start_x"] = start_x
+    out.at[row_idx, "integration_end_x"] = end_x
+    out.at[row_idx, "matched_peak_id"] = np.nan
+    out.at[row_idx, "match_score"] = abs(center - predicted_center)
+    # Keep this distinct from ``matched_c20_fit``.  The latter is an
+    # under-integrated *detected* EPA and may receive an empirical overlap
+    # credit in the legacy formula.  This component was already deconvolved;
+    # applying that credit again would double count the hidden EPA area.
+    out.at[row_idx, "status"] = "recovered_c20_missing_epa_component"
+    if np.isfinite(fit_meta.get("r2", np.nan)):
+        out.at[row_idx, "fit_r2"] = float(fit_meta["r2"])
+    return out
+
+
 def recover_missing_c22_components_with_fit(
     df: pd.DataFrame,
     peaks_df: pd.DataFrame,
@@ -1175,11 +1326,9 @@ def recover_missing_c22_components_with_fit(
         return out
     current_cluster_total = float(area_by_code.fillna(0.0).sum())
 
-    nominal_centers = {
-        "C22:6": 9.252,
-        "C22:5": 9.285,
-        "C22:4": 9.316,
-    }
+    fallback_centers = [9.252, 9.285, 9.316]
+    profile_centers = rt_profile.target_centers(out, c22_codes, fallback_centers, corrected=True)
+    nominal_centers = dict(zip(c22_codes, profile_centers))
     observed_shifts = []
     for code in c22_codes:
         found_rt = pd.to_numeric(
@@ -1189,6 +1338,9 @@ def recover_missing_c22_components_with_fit(
             observed_shifts.append(float(found_rt) - nominal_centers[code])
     cluster_shift = float(np.median(observed_shifts)) if observed_shifts else 0.0
     shifted_centers = [nominal_centers[code] + cluster_shift for code in c22_codes]
+    window_left, window_right = rt_profile.shifted_window(
+        out, c22_codes, fallback_centers, 9.22, 9.33
+    )
 
     fit_out, _ = _refine_cluster_with_deconvolution(
         df=df,
@@ -1196,8 +1348,8 @@ def recover_missing_c22_components_with_fit(
         matched_targets_df=out,
         cluster_codes=c22_codes,
         default_centers=shifted_centers,
-        window_left=9.22,
-        window_right=9.33,
+        window_left=window_left,
+        window_right=window_right,
         center_tolerances=[0.012, 0.012, 0.012],
         status="matched_c22_fit",
     )
@@ -1223,26 +1375,66 @@ def recover_underintegrated_c20_components_with_fit(
 
     epa_area = pd.to_numeric(epa_row["area"], errors="coerce").iloc[0]
     matched_peak_id = pd.to_numeric(epa_row["matched_peak_id"], errors="coerce").iloc[0]
-    if not np.isfinite(epa_area) or not np.isfinite(matched_peak_id):
-        return out
-    if float(epa_area) > C20_FIT_EPA_AREA_MAX:
-        return out
+    c20_codes = ["C20:4N6", "C20:5", "C20:3N8"]
+    c20_fallback_centers = [8.382, 8.410, 8.467]
+    c20_centers = rt_profile.target_centers(out, c20_codes, c20_fallback_centers, corrected=True)
 
-    peak_row = peaks_df[peaks_df["peak_id"] == int(matched_peak_id)]
-    if peak_row.empty:
-        return out
-    epa_prominence = float(peak_row.iloc[0].get("raw_prominence", peak_row.iloc[0]["prominence"]))
-    if epa_prominence > C20_FIT_EPA_PROMINENCE_MAX:
-        return out
+    epa_missing = not np.isfinite(epa_area) or not np.isfinite(matched_peak_id)
+    if epa_missing:
+        cluster = out[out["code"].isin(c20_codes)].set_index("code")
+        if not all(code in cluster.index for code in c20_codes):
+            return out
+        flank_rts = []
+        flank_shifts = []
+        for code, nominal_rt in zip(c20_codes, c20_centers):
+            if code == "C20:5":
+                continue
+            found_rt = pd.to_numeric(
+                pd.Series([cluster.at[code, "found_rt"]]), errors="coerce"
+            ).iloc[0]
+            area = pd.to_numeric(
+                pd.Series([cluster.at[code, "area"]]), errors="coerce"
+            ).iloc[0]
+            if not (np.isfinite(found_rt) and np.isfinite(area) and area > 0):
+                return out
+            flank_rts.append(float(found_rt))
+            flank_shifts.append(float(found_rt) - float(nominal_rt))
+        if flank_rts[0] >= flank_rts[1]:
+            return out
+        cluster_shift = float(np.median(flank_shifts))
+        c20_centers = [float(center + cluster_shift) for center in c20_centers]
+    else:
+        if float(epa_area) > C20_FIT_EPA_AREA_MAX:
+            return out
+        peak_row = peaks_df[peaks_df["peak_id"] == int(matched_peak_id)]
+        if peak_row.empty:
+            return out
+        epa_prominence = float(peak_row.iloc[0].get("raw_prominence", peak_row.iloc[0]["prominence"]))
+        if epa_prominence > C20_FIT_EPA_PROMINENCE_MAX:
+            return out
+
+    window_left, window_right = rt_profile.shifted_window(
+        out, c20_codes, c20_fallback_centers, 8.35, 8.50
+    )
+    if epa_missing:
+        return _recover_missing_epa_component_only(
+            df=df,
+            matched_targets_df=out,
+            cluster_codes=c20_codes,
+            initial_centers=c20_centers,
+            window_left=window_left,
+            window_right=window_right,
+            center_tolerances=[0.010, 0.010, 0.015],
+        )
 
     fit_out, _ = _refine_cluster_with_deconvolution(
         df=df,
         peaks_df=peaks_df,
         matched_targets_df=out,
-        cluster_codes=["C20:4N6", "C20:5", "C20:3N8"],
-        default_centers=[8.382, 8.410, 8.467],
-        window_left=8.35,
-        window_right=8.50,
+        cluster_codes=c20_codes,
+        default_centers=c20_centers,
+        window_left=window_left,
+        window_right=window_right,
         center_tolerances=[0.010, 0.010, 0.015],
         status="matched_c20_fit",
     )
@@ -1271,14 +1463,19 @@ def recover_overlapped_c18_components_with_fit(
     ):
         return out
 
+    fallback_centers = [7.623, 7.650, 7.750]
+    profile_centers = rt_profile.target_centers(out, c18_codes, fallback_centers, corrected=True)
+    window_left, window_right = rt_profile.shifted_window(
+        out, c18_codes, fallback_centers, 7.57, 7.79
+    )
     fit_out, _ = _refine_cluster_with_deconvolution(
         df=df,
         peaks_df=peaks_df,
         matched_targets_df=out,
         cluster_codes=c18_codes,
-        default_centers=[7.623, 7.650, 7.750],
-        window_left=7.57,
-        window_right=7.79,
+        default_centers=profile_centers,
+        window_left=window_left,
+        window_right=window_right,
         center_tolerances=[0.015, 0.015, 0.018],
         status="matched_c18_pvfit",
     )

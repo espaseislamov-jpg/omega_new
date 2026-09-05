@@ -99,6 +99,11 @@ C20_EPA_UNDERFIT_WIDTH_RATIO = 1.80
 C20_EPA_UNDERFIT_STRICT_MAX = 4.60
 C20_EPA_UNDERFIT_CREDIT_MIN = 20.0
 C20_EPA_UNDERFIT_EXTRA_SCALE = 1.70
+# A very broad C20:3N8 component is not evidence that most of its area belongs
+# to EPA.  The historical 65% floor turned exactly this geometry into the
+# largest positive C20 outliers in the legacy corpus.  Keep the floor only for
+# a compact neighbour; broad neighbours retain the bounded model estimate.
+C20_EPA_FORCED_CREDIT_NEIGHBOR_WIDTH_MAX = 0.072
 C20_EPA_MODEL_SCALES = np.asarray([
     0.9895635778699382,
     0.5615594221089807,
@@ -120,6 +125,8 @@ C20_EPA_MODEL_PARAMS = np.asarray([
 ], dtype=float)
 
 CLUSTER_QUALITY_COMPLETE_SCORE = 50.0
+GEOMETRY_READY_SCORE = 85.0
+GEOMETRY_STOP_SCORE = 55.0
 
 # Conservative, reference-free warning envelope calibrated on every available
 # non-sealed manual batch.  It is intentionally tuned for recall: all known
@@ -131,6 +138,60 @@ HIGH_ERROR_C20_TARGET_RT_MIN = 7.7845
 HIGH_ERROR_EPA_RT_MAX = 8.4140
 HIGH_ERROR_EARLY_C20_TARGET_RT_MAX = 7.7795
 HIGH_ERROR_C22_4_LEFT_WIDTH_MIN = 0.01746
+# This threshold is intentionally a review-order hint, not a warning rule.
+# On the non-sealed legacy corpus it ranked large errors slightly better than
+# the corresponding area ratio, but replacing the area rule missed one held-out
+# batch error.  A custom instrument profile must provide its own validated
+# threshold before the height ratio is interpreted.
+LEGACY_C22_HEIGHT_PRIORITY_RATIO = 1.3635
+
+# Emergency, deliberately broad geometry gates for a custom instrument profile.
+# They are not a substitute for profile calibration.  Their only purpose is to
+# keep obviously misplaced/truncated numerator peaks out of an unattended
+# result while the second-instrument reference set is still small.
+EMERGENCY_KEY_RT_RESIDUAL_MAX = 0.020
+EMERGENCY_KEY_WIDTH_MIN = 0.008
+EMERGENCY_KEY_WIDTH_MAX = 0.085
+EMERGENCY_APEX_EDGE_MIN = 0.0025
+EMERGENCY_C20_HEIGHT_RATIO_MIN = 0.20
+EMERGENCY_C20_HEIGHT_RATIO_MAX = 1.20
+EMERGENCY_C22_HEIGHT_RATIO_MIN = 0.55
+EMERGENCY_C22_HEIGHT_RATIO_MAX = 2.05
+
+
+def annotate_peak_heights(
+    processed: pd.DataFrame,
+    matched_targets: pd.DataFrame,
+) -> pd.DataFrame:
+    """Attach smoothed baseline-corrected peak heights inside accepted bounds."""
+    if matched_targets is None:
+        return matched_targets
+    out = matched_targets.copy()
+    out["peak_height_smooth"] = np.nan
+    if processed is None or processed.empty or out.empty:
+        return out
+    if not {"integration_start_x", "integration_end_x"}.issubset(out.columns):
+        return out
+
+    x_column = "x_corrected" if "x_corrected" in processed else "x"
+    if x_column not in processed or "y_smooth" not in processed:
+        return out
+    x = pd.to_numeric(processed[x_column], errors="coerce").to_numpy(dtype=float)
+    y_smooth = pd.to_numeric(processed["y_smooth"], errors="coerce").to_numpy(dtype=float)
+    finite_signal = np.isfinite(x) & np.isfinite(y_smooth)
+    if not finite_signal.any():
+        return out
+
+    for row_index, row in out.iterrows():
+        start_x = pd.to_numeric(pd.Series([row.get("integration_start_x")]), errors="coerce").iloc[0]
+        end_x = pd.to_numeric(pd.Series([row.get("integration_end_x")]), errors="coerce").iloc[0]
+        if not (np.isfinite(start_x) and np.isfinite(end_x) and end_x > start_x):
+            continue
+        mask = finite_signal & (x >= float(start_x)) & (x <= float(end_x))
+        if int(mask.sum()) < 3:
+            continue
+        out.at[row_index, "peak_height_smooth"] = max(float(np.nanmax(y_smooth[mask])), 0.0)
+    return out
 
 
 def compute_omega(matched_targets: pd.DataFrame) -> dict:
@@ -196,6 +257,42 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         value = row["status"].iloc[0]
         return "" if pd.isna(value) else str(value)
 
+    calculation_mode = "legacy"
+    if "instrument_profile_calculation_mode" in valid:
+        calculation_mode = str(valid["instrument_profile_calculation_mode"].iloc[0])
+    if calculation_mode == "direct_components":
+        if "instrument_profile_omega_component" not in valid:
+            return result
+        component_rows = valid[
+            valid["instrument_profile_omega_component"].fillna(False).astype(bool)
+        ]
+        component_area = float(component_rows["area"].sum())
+        direct_value = 100.0 * component_area / total_area
+        epa = area_of("C20:5")
+        dha = area_of("C22:6")
+        dpa = area_of("C22:5")
+        c20_3 = area_of("C20:3N8")
+        c22_4 = area_of("C22:4")
+        result.update({
+            "omega3_trio": direct_value,
+            "omega3_trio_strict": direct_value,
+            "omega3_trio_corrected": direct_value,
+            "total_area": total_area,
+            "effective_total_area": total_area,
+            "epa_area": epa,
+            "dha_area": dha,
+            "dpa_area": dpa,
+            "epa_neighbor_area": c20_3,
+            "epa_effective_area": epa,
+            "c22_overlap_source_area": c22_4,
+            "c22_reference_ratio": dpa / c22_4 if c22_4 > 0 else np.nan,
+            "epa_anchor_coefficient": rt_profile.estimate_anchor_coefficient(valid),
+            "epa_anchor_gate_max": C20_EPA_MODEL_ANCHOR_COEFFICIENT_MAX,
+            "profile_component_area": component_area,
+            "profile_calculation_applied": True,
+        })
+        return result
+
     epa, dha, dpa = area_of("C20:5"), area_of("C22:6"), area_of("C22:5")
     anchor_coefficient = rt_profile.estimate_anchor_coefficient(valid)
     c20_3 = area_of("C20:3N8")
@@ -235,9 +332,12 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     epa_overlap_fraction = 0.0
     epa_model_applied = False
     epa_extra_scale = 1.0
+    epa_status = status_of("C20:5")
+    epa_was_deconvolved_from_missing = "recovered_c20_missing_epa_component" in epa_status
     epa_to_c20_3_ratio = epa / c20_3 if c20_3 > 0 else np.nan
     if (
         ENABLE_DATA_DRIVEN_C20_EPA_MODEL
+        and not epa_was_deconvolved_from_missing
         and np.isfinite(anchor_coefficient)
         and anchor_coefficient <= C20_EPA_MODEL_ANCHOR_COEFFICIENT_MAX
         and c20_3 > 0
@@ -296,6 +396,7 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
             and np.isfinite(c20_width_neighbor)
             and c20_width_epa <= 0.025
             and c20_width_neighbor >= 2.0 * c20_width_epa
+            and c20_width_neighbor <= C20_EPA_FORCED_CREDIT_NEIGHBOR_WIDTH_MAX
         ):
             epa_credit_area = max(epa_credit_area, 0.65 * c20_3)
             epa_overlap_fraction = epa_credit_area / c20_3 if c20_3 > 0 else 0.0
@@ -505,10 +606,51 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
             return np.nan
         return value if np.isfinite(value) else np.nan
 
+    def truthy(name: str, default: bool = False) -> bool:
+        value = features.get(name, default)
+        if isinstance(value, str):
+            return value.strip().casefold() in {"1", "true", "yes", "да"}
+        return bool(value)
+
     score = 0
     reason_codes: list[str] = []
     reasons: list[str] = []
     peak_codes: set[str] = set()
+
+    custom_profile = truthy("instrument_profile_custom_rt")
+    judge_calibrated = truthy(
+        "instrument_profile_judge_calibrated",
+        default=not custom_profile,
+    )
+    emergency_enabled = truthy("instrument_profile_judge_emergency_enabled")
+    emergency_target = finite("instrument_profile_judge_target_abs_error")
+    c22_height_ratio = finite("C22_height_ratio")
+    c22_height_threshold = finite("C22_height_priority_threshold")
+
+    if custom_profile and not judge_calibrated and not emergency_enabled:
+        score = max(score, 88)
+        reason_codes.append("instrument_profile_uncalibrated")
+        peak_codes.update(["C20:5", "C22:6", "C22:5", "C22:4"])
+        reasons.append(
+            "Судья ещё не проверен на ручных результатах этого прибора. "
+            "До профильной калибровки результат нельзя выпускать только по зелёному статусу."
+        )
+
+    emergency_codes = [
+        str(code) for code in (features.get("emergency_geometry_codes", []) or []) if str(code)
+    ]
+    emergency_reasons = [
+        str(reason) for reason in (features.get("emergency_geometry_reasons", []) or []) if str(reason)
+    ]
+    if custom_profile and emergency_enabled and emergency_codes:
+        score = max(score, 88)
+        reason_codes.append("emergency_profile_geometry")
+        peak_codes.update(emergency_codes)
+        reasons.append(
+            "Экстренная проверка нашла подозрительное назначение или неполные границы "
+            f"пиков: {', '.join(sorted(set(emergency_codes)))}."
+        )
+        reasons.extend(emergency_reasons)
 
     missing_key_peaks = [
         str(code) for code in (features.get("missing_key_peaks", []) or []) if str(code)
@@ -541,11 +683,12 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
     c22_4_left_width = finite("C22_4_left_width")
 
     unstable_profile = bool(
-        np.all(np.isfinite([
-            legacy_fraction,
-            dpa_rt,
-            c20_target_rt,
-            epa_rt,
+        not custom_profile
+        and np.all(np.isfinite([
+                legacy_fraction,
+                dpa_rt,
+                c20_target_rt,
+                epa_rt,
         ]))
         and legacy_fraction <= HIGH_ERROR_LEGACY_FRACTION_SPLIT
         and dpa_rt <= HIGH_ERROR_DPA_RT_MAX
@@ -562,7 +705,8 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
         )
 
     early_retention_profile = bool(
-        np.isfinite(c20_target_rt)
+        not custom_profile
+        and np.isfinite(c20_target_rt)
         and c20_target_rt <= HIGH_ERROR_EARLY_C20_TARGET_RT_MAX
     )
     if early_retention_profile:
@@ -575,7 +719,8 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
         )
 
     broad_shared_c22_tail = bool(
-        np.all(np.isfinite([legacy_fraction, c22_4_left_width]))
+        not custom_profile
+        and np.all(np.isfinite([legacy_fraction, c22_4_left_width]))
         and legacy_fraction > HIGH_ERROR_LEGACY_FRACTION_SPLIT
         and c22_4_left_width > HIGH_ERROR_C22_4_LEFT_WIDTH_MIN
     )
@@ -586,6 +731,21 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
         reasons.append(
             "Левая граница C22:4 захватывает широкий общий хвост. "
             "Сверьте площади и разделение C22:5/C22:4."
+        )
+
+    review_priority = "normal"
+    if (
+        score >= 85
+        and judge_calibrated
+        and np.isfinite(c22_height_ratio)
+        and np.isfinite(c22_height_threshold)
+        and c22_height_ratio >= c22_height_threshold
+    ):
+        review_priority = "c22_first"
+        reason_codes.append("c22_height_priority")
+        peak_codes.update(["C22:5", "C22:4"])
+        reasons.append(
+            "Сначала проверьте разделение C22:5 и C22:4: соотношение высот указывает на повышенный риск."
         )
 
     if score >= 95:
@@ -600,6 +760,12 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
         "reason_codes": reason_codes,
         "reasons": reasons,
         "peak_codes": sorted(peak_codes),
+        "review_priority": review_priority,
+        "c22_height_ratio": c22_height_ratio,
+        "c22_height_priority_threshold": c22_height_threshold,
+        "instrument_profile_judge_calibrated": judge_calibrated,
+        "instrument_profile_judge_emergency_enabled": emergency_enabled,
+        "instrument_profile_judge_target_abs_error": emergency_target,
     }
 
 
@@ -616,6 +782,7 @@ def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, ob
         "integration_start_x",
         "integration_end_x",
         "matched_peak_id",
+        "peak_height_smooth",
     ]:
         valid[column] = (
             pd.to_numeric(valid[column], errors="coerce")
@@ -624,15 +791,25 @@ def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, ob
         )
 
     def target_value(code: str, column: str) -> float:
+        if column not in valid:
+            return np.nan
         row = valid.loc[valid["code"] == code, column]
         if row.empty or not np.isfinite(row.iloc[0]):
             return np.nan
         return float(row.iloc[0])
 
+    key_codes = ["C20:5", "C22:6", "C22:5"]
+    if "instrument_profile_omega_component" in valid:
+        component_mask = valid["instrument_profile_omega_component"].fillna(False).astype(bool)
+        selected_codes = valid.loc[component_mask, "code"].astype(str).tolist()
+        if selected_codes:
+            key_codes = selected_codes
+
     missing_key_peaks = []
-    for code in ["C20:5", "C22:6", "C22:5"]:
+    for code in key_codes:
         area = target_value(code, "area")
-        if not np.isfinite(area) or area <= 0:
+        found_rt = target_value(code, "found_rt")
+        if not np.isfinite(area) or area <= 0 or not np.isfinite(found_rt):
             missing_key_peaks.append(code)
 
     matched_ids = valid.dropna(subset=["matched_peak_id"])[["code", "matched_peak_id"]]
@@ -641,12 +818,133 @@ def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, ob
 
     c22_4_rt = target_value("C22:4", "found_rt")
     c22_4_start = target_value("C22:4", "integration_start_x")
+    c22_5_height = target_value("C22:5", "peak_height_smooth")
+    c22_4_height = target_value("C22:4", "peak_height_smooth")
+    c22_height_ratio = (
+        c22_5_height / c22_4_height
+        if np.isfinite(c22_5_height) and np.isfinite(c22_4_height) and c22_4_height > 0
+        else np.nan
+    )
+    custom_profile = rt_profile.uses_custom_instrument_profile(valid)
+    judge_calibrated = not custom_profile
+    if "instrument_profile_judge_calibrated" in valid:
+        calibration_value = valid["instrument_profile_judge_calibrated"].iloc[0]
+        if pd.notna(calibration_value):
+            judge_calibrated = bool(calibration_value)
+    emergency_enabled = False
+    if "instrument_profile_judge_emergency_enabled" in valid:
+        emergency_value = valid["instrument_profile_judge_emergency_enabled"].iloc[0]
+        if pd.notna(emergency_value):
+            emergency_enabled = bool(emergency_value)
+    emergency_target = np.nan
+    if "instrument_profile_judge_target_abs_error" in valid:
+        emergency_target = pd.to_numeric(
+            valid["instrument_profile_judge_target_abs_error"], errors="coerce"
+        ).iloc[0]
+
+    emergency_codes: set[str] = set()
+    emergency_reasons: list[str] = []
+
+    def emergency_issue(codes: list[str], reason: str) -> None:
+        emergency_codes.update(codes)
+        if reason not in emergency_reasons:
+            emergency_reasons.append(reason)
+
+    if custom_profile and emergency_enabled:
+        for code in key_codes:
+            found_rt = target_value(code, "found_rt")
+            target_rt = target_value(code, "corrected_target_rt")
+            start_x = target_value(code, "integration_start_x")
+            end_x = target_value(code, "integration_end_x")
+            if not np.all(np.isfinite([found_rt, target_rt, start_x, end_x])):
+                emergency_issue([code], f"У {code} не удалось проверить положение и обе границы.")
+                continue
+            width = end_x - start_x
+            if abs(found_rt - target_rt) > EMERGENCY_KEY_RT_RESIDUAL_MAX:
+                emergency_issue([code], f"Вершина {code} слишком далеко от ожидаемого положения.")
+            if not EMERGENCY_KEY_WIDTH_MIN <= width <= EMERGENCY_KEY_WIDTH_MAX:
+                emergency_issue([code], f"Ширина {code} нетипична для расчётного пика.")
+            if (
+                found_rt - start_x < EMERGENCY_APEX_EDGE_MIN
+                or end_x - found_rt < EMERGENCY_APEX_EDGE_MIN
+            ):
+                emergency_issue([code], f"Граница {code} проходит почти по вершине пика.")
+
+            status_row = (
+                valid.loc[valid["code"] == code, "status"]
+                if "status" in valid
+                else pd.Series(dtype=object)
+            )
+            status = (
+                ""
+                if status_row.empty or pd.isna(status_row.iloc[0])
+                else str(status_row.iloc[0]).casefold()
+            )
+            if any(
+                token in status
+                for token in ("not_found", "unresolved", "identity_center_locked", "recovered_")
+            ):
+                emergency_issue([code], f"{code} был восстановлен неуверенно и требует просмотра.")
+
+        c20_5_height = target_value("C20:5", "peak_height_smooth")
+        c20_3_height = target_value("C20:3N8", "peak_height_smooth")
+        c20_height_ratio = (
+            c20_5_height / c20_3_height
+            if np.isfinite(c20_5_height) and np.isfinite(c20_3_height) and c20_3_height > 0
+            else np.nan
+        )
+        if np.isfinite(c20_height_ratio) and not (
+            EMERGENCY_C20_HEIGHT_RATIO_MIN
+            <= c20_height_ratio
+            <= EMERGENCY_C20_HEIGHT_RATIO_MAX
+        ):
+            emergency_issue(
+                ["C20:5", "C20:3N8"],
+                "Соотношение высот C20 нетипично: сначала проверьте, что выбраны правильные вершины.",
+            )
+
+        if np.isfinite(c22_height_ratio) and not (
+            EMERGENCY_C22_HEIGHT_RATIO_MIN
+            <= c22_height_ratio
+            <= EMERGENCY_C22_HEIGHT_RATIO_MAX
+        ):
+            emergency_issue(
+                ["C22:5", "C22:4"],
+                "Соотношение высот C22 нетипично: проверьте назначение и разделение пиков.",
+            )
+    height_threshold = LEGACY_C22_HEIGHT_PRIORITY_RATIO if not custom_profile else np.nan
+    if "instrument_profile_c22_height_priority_threshold" in valid:
+        profile_threshold = pd.to_numeric(
+            valid["instrument_profile_c22_height_priority_threshold"], errors="coerce"
+        ).iloc[0]
+        if np.isfinite(profile_threshold):
+            height_threshold = float(profile_threshold)
+    c20_judge_target_rt = target_value("C20:3N8", "corrected_target_rt")
+    if not rt_profile.uses_custom_instrument_profile(valid):
+        # Legacy high-risk thresholds were calibrated on expected_rt + the
+        # global matcher shift.  The GUI now displays the real resolved C20
+        # cluster centres, but changing that display must not silently retune
+        # the production judge or create extra warnings.
+        c20_row = valid[valid["code"] == "C20:3N8"]
+        if not c20_row.empty:
+            expected_rt = pd.to_numeric(c20_row.get("expected_rt"), errors="coerce").iloc[0]
+            local_shift = pd.to_numeric(c20_row.get("rt_local_shift"), errors="coerce").iloc[0]
+            if np.isfinite(expected_rt) and np.isfinite(local_shift):
+                c20_judge_target_rt = float(expected_rt + local_shift)
     features = {
         "missing_key_peaks": missing_key_peaks,
         "duplicate_peak_codes": duplicate_codes,
+        "instrument_profile_custom_rt": custom_profile,
+        "instrument_profile_judge_calibrated": judge_calibrated,
+        "instrument_profile_judge_emergency_enabled": emergency_enabled,
+        "instrument_profile_judge_target_abs_error": emergency_target,
+        "emergency_geometry_codes": sorted(emergency_codes),
+        "emergency_geometry_reasons": emergency_reasons,
+        "C22_height_ratio": c22_height_ratio,
+        "C22_height_priority_threshold": height_threshold,
         "omega_c22_overlap_legacy_fraction": omega.get("c22_overlap_legacy_fraction", np.nan),
         "C22_5_found_rt": target_value("C22:5", "found_rt"),
-        "C20_3N8_corrected_target_rt": target_value("C20:3N8", "corrected_target_rt"),
+        "C20_3N8_corrected_target_rt": c20_judge_target_rt,
         "C20_5_found_rt": target_value("C20:5", "found_rt"),
         "C22_4_left_width": c22_4_rt - c22_4_start
         if np.isfinite(c22_4_rt) and np.isfinite(c22_4_start)
@@ -792,6 +1090,8 @@ def assess_confidence(
     w_c20_3 = width_of("C20:3N8")
     if "identity_center_locked" in epa_status:
         penalize(10.0, "Математическая модель C20:5 ушла в сторону — проверьте выбранную вершину")
+    elif "recovered_c20_missing_epa_component" in epa_status:
+        penalize(10.0, "Пик C20:5 восстановлен из слившегося участка — проверьте его границы")
     elif "matched_c20_fit" in epa_status:
         penalize(10.0, "Пик C20:5 выделен неуверенно — проверьте его границы")
     elif "matched_c20_local" in epa_status:
@@ -840,11 +1140,11 @@ def assess_confidence(
         score = min(score, 35.0)
     elif high_error_risk.get("score", 0) >= 85:
         score = min(score, 54.0)
-    if score >= 85.0:
+    if score >= GEOMETRY_READY_SCORE:
         level = "Геометрия OK"
     elif score >= 70.0:
         level = "Быстрая проверка"
-    elif score >= 55.0:
+    elif score >= GEOMETRY_STOP_SCORE:
         level = "Проверить границы"
     else:
         level = "Ручная проверка"
@@ -866,6 +1166,9 @@ def assess_confidence(
     c22_ratio = float(omega.get("c22_reference_ratio", np.nan))
     if np.isfinite(c22_ratio):
         metrics.append(f"C22 area DPA/C22:4 = {c22_ratio:.2f}")
+    c22_height_ratio = float(high_error_risk.get("c22_height_ratio", np.nan))
+    if np.isfinite(c22_height_ratio):
+        metrics.append(f"C22 height DPA/C22:4 = {c22_height_ratio:.2f}")
     c22_debit = float(omega.get("c22_overintegration_debit_points", 0.0))
     metrics.append(f"C22 коррекции: credit area {c22_credit:.1f}; debit {c22_debit:.2f} п.п.")
 
@@ -878,6 +1181,10 @@ def assess_confidence(
     elif high_error_risk.get("score", 0) >= 85:
         risky_codes = ", ".join(high_error_risk.get("peak_codes", []))
         result["button_text"] = f"ПРОВЕРИТЬ — {risky_codes or 'границы'}"
+    elif geometry_score < GEOMETRY_STOP_SCORE:
+        result["button_text"] = "СТОП — ручная проверка пиков"
+    elif geometry_score < GEOMETRY_READY_SCORE:
+        result["button_text"] = "ПРОВЕРИТЬ — геометрию пиков"
     else:
         result["button_text"] = "ГОТОВО — ручная правка не нужна"
     result["reasons"] = reasons

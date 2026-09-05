@@ -845,30 +845,42 @@ def refine_cluster_areas_by_local_valleys(
     if df is None or df.empty or out is None or out.empty:
         return out
 
+    c18_codes = ["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"]
+    c20_codes = ["C20:4N6", "C20:5", "C20:3N8"]
+    c22_codes = ["C22:6", "C22:5", "C22:4"]
+    c18_window = rt_profile.shifted_window(
+        out, c18_codes, [7.593, 7.623, 7.650, 7.750], 7.56, 7.79
+    )
+    c20_window = rt_profile.shifted_window(
+        out, c20_codes, [8.381, 8.410, 8.467], 8.34, 8.50
+    )
+    c22_window = rt_profile.shifted_window(
+        out, c22_codes, [9.252, 9.285, 9.316], 9.22, 9.34
+    )
     out = _reintegrate_cluster_by_local_minima(
         df=df,
         matched_targets=out,
-        cluster_codes=["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"],
-        window_left=7.56,
-        window_right=7.79,
+        cluster_codes=c18_codes,
+        window_left=c18_window[0],
+        window_right=c18_window[1],
         status_suffix="valley",
         force=EXPERIMENTAL_FORCE_CLUSTER_VALLEYS or _should_force_c18_valley_split(out),
     )
     out = _reintegrate_cluster_by_local_minima(
         df=df,
         matched_targets=out,
-        cluster_codes=["C20:4N6", "C20:5", "C20:3N8"],
-        window_left=8.34,
-        window_right=8.50,
+        cluster_codes=c20_codes,
+        window_left=c20_window[0],
+        window_right=c20_window[1],
         status_suffix="valley",
         force=EXPERIMENTAL_FORCE_CLUSTER_VALLEYS,
     )
     out = _reintegrate_cluster_by_local_minima(
         df=df,
         matched_targets=out,
-        cluster_codes=["C22:6", "C22:5", "C22:4"],
-        window_left=9.22,
-        window_right=9.34,
+        cluster_codes=c22_codes,
+        window_left=c22_window[0],
+        window_right=c22_window[1],
         status_suffix="valley",
         force=EXPERIMENTAL_FORCE_CLUSTER_VALLEYS,
     )
@@ -979,6 +991,11 @@ def refine_c18_c20_cluster_matches(
         return peaks_out, out
 
     c18_codes = ["C18:2N6C", "C18:1N9C", "C18:3N3", "C18:0"]
+    c18_fallback_centers = [7.593, 7.623, 7.650, 7.750]
+    c18_centers = rt_profile.target_centers(out, c18_codes, c18_fallback_centers, corrected=True)
+    c18_window_left, c18_window_right = rt_profile.shifted_window(
+        out, c18_codes, c18_fallback_centers, 7.56, 7.79
+    )
     c18_choice = None
     c18_cluster = out[out["code"].isin(c18_codes)].copy()
     c18_has_missing = (
@@ -992,14 +1009,14 @@ def refine_c18_c20_cluster_matches(
     ):
         c18_candidates = _collect_local_cluster_peak_geometries(
             df,
-            window_left=7.56,
-            window_right=7.79,
+            window_left=c18_window_left,
+            window_right=c18_window_right,
             min_prominence=100.0,
             min_area=10.0,
         )
         c18_choice = _select_ordered_cluster_peaks(
             c18_candidates,
-            target_apexes=[7.593, 7.623, 7.650, 7.750],
+            target_apexes=c18_centers,
             max_distances=[0.022, 0.022, 0.025, 0.028],
             allow_common_shift=True,
             max_common_shift=0.035,
@@ -1074,16 +1091,21 @@ def refine_c18_c20_cluster_matches(
             out.at[c18_1_idx, "status"] = "estimated_c18_1_unresolved"
 
     c20_codes = ["C20:4N6", "C20:5", "C20:3N8"]
+    c20_fallback_centers = [8.381, 8.410, 8.467]
+    c20_centers = rt_profile.target_centers(out, c20_codes, c20_fallback_centers, corrected=True)
+    c20_window_left, c20_window_right = rt_profile.shifted_window(
+        out, c20_codes, c20_fallback_centers, 8.34, 8.50
+    )
     c20_candidates = _collect_local_cluster_peak_geometries(
         df,
-        window_left=8.34,
-        window_right=8.50,
+        window_left=c20_window_left,
+        window_right=c20_window_right,
         min_prominence=10.0,
         min_area=2.0,
     )
     c20_choice = _select_ordered_cluster_peaks(
         c20_candidates,
-        target_apexes=[8.381, 8.410, 8.467],
+        target_apexes=c20_centers,
         max_distances=[0.025, 0.018, 0.025],
         min_apex_gaps=[0.016, 0.020],
     )
@@ -1638,14 +1660,19 @@ def enforce_target_rt_corridors(
     for column in ["found_rt", "corrected_target_rt", "integration_start_x", "integration_end_x", "area"]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
     anchor_coefficient = rt_profile.estimate_anchor_coefficient(work)
-    manual_centers = work["code"].map(lambda code: rt_profile.MANUAL_TABLE_RTS.get(str(code)))
-    manual_centers = pd.to_numeric(manual_centers, errors="coerce")
-    if np.isfinite(anchor_coefficient) and anchor_coefficient > 0:
-        manual_centers = manual_centers / float(anchor_coefficient)
-    work["_corridor_center"] = manual_centers.where(
-        manual_centers.notna(),
-        work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"]),
-    )
+    if rt_profile.uses_custom_instrument_profile(work):
+        work["_corridor_center"] = work["corrected_target_rt"].where(
+            work["corrected_target_rt"].notna(), work["found_rt"]
+        )
+    else:
+        manual_centers = work["code"].map(lambda code: rt_profile.MANUAL_TABLE_RTS.get(str(code)))
+        manual_centers = pd.to_numeric(manual_centers, errors="coerce")
+        if np.isfinite(anchor_coefficient) and anchor_coefficient > 0:
+            manual_centers = manual_centers / float(anchor_coefficient)
+        work["_corridor_center"] = manual_centers.where(
+            manual_centers.notna(),
+            work["corrected_target_rt"].where(work["corrected_target_rt"].notna(), work["found_rt"]),
+        )
     work = work.dropna(subset=["_corridor_center", "found_rt", "integration_start_x", "integration_end_x"]).sort_values("_corridor_center")
     if len(work) < 2:
         return out
@@ -1797,7 +1824,10 @@ def recover_single_missing_c22_by_local_bounds(
         return out
 
     c22_codes = ["C22:6", "C22:5", "C22:4"]
-    nominal_centers = {"C22:6": 9.252, "C22:5": 9.285, "C22:4": 9.316}
+    profile_centers = rt_profile.target_centers(
+        out, c22_codes, [9.252, 9.285, 9.316], corrected=True
+    )
+    nominal_centers = dict(zip(c22_codes, profile_centers))
     cluster = out[out["code"].isin(c22_codes)].copy()
     if len(cluster) != len(c22_codes):
         return out

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from . import chromatopy_adapter, clusters, io, matching, metrics, rt_profile, signal
+from . import chromatopy_adapter, clusters, instrument_profiles, io, joint_clusters, matching, metrics, rt_profile, signal
 
 def process_from_baseline(
     processed: pd.DataFrame,
@@ -13,7 +13,9 @@ def process_from_baseline(
     strict_matching: bool = False,
 ) -> dict:
     processed, best_window = signal.add_smoothing_and_derivatives(processed)
-    peaks = signal.detect_peak_candidates(processed, best_window=best_window)
+    peaks = signal.detect_peak_candidates(
+        processed, best_window=best_window, reference_targets=reference_targets
+    )
     matched_targets, rt_shift = matching.match_targets_to_peaks(
         reference_targets,
         peaks,
@@ -22,6 +24,7 @@ def process_from_baseline(
     matched_targets = chromatopy_adapter.apply_chromatopy_target_integration(processed, matched_targets)
     peaks, matched_targets = clusters.refine_cluster_matches(processed, peaks, matched_targets)
     matched_targets = rt_profile.annotate_rt_profile(matched_targets)
+    matched_targets = metrics.annotate_peak_heights(processed, matched_targets)
     omega = metrics.compute_omega(matched_targets)
     judge_decisions = matched_targets.attrs.get(clusters.JUDGE_DECISIONS_ATTR, [])
     return {
@@ -229,6 +232,11 @@ def _strict_assignments_are_sane(result: dict) -> tuple[bool, str]:
         work[column] = pd.to_numeric(work.get(column), errors="coerce")
 
     key_codes = ["C20:5", "C22:6", "C22:5"]
+    if "instrument_profile_omega_component" in work:
+        component_mask = work["instrument_profile_omega_component"].fillna(False).astype(bool)
+        selected_codes = work.loc[component_mask, "code"].astype(str).tolist()
+        if selected_codes:
+            key_codes = selected_codes
     for code in key_codes:
         row = work[work["code"] == code]
         if row.empty or not np.isfinite(row["area"].iloc[0]) or float(row["area"].iloc[0]) <= 0:
@@ -253,7 +261,12 @@ def _strict_assignments_are_sane(result: dict) -> tuple[bool, str]:
             found_rt = float(rows.at[code, "found_rt"])
             if not np.isfinite(found_rt):
                 continue
-            expected = rt_profile.expected_rt(code, anchor)
+            if rt_profile.uses_custom_instrument_profile(work):
+                expected = pd.to_numeric(
+                    pd.Series([rows.at[code, "corrected_target_rt"]]), errors="coerce"
+                ).iloc[0]
+            else:
+                expected = rt_profile.expected_rt(code, anchor)
             if abs(found_rt - expected) > 0.055:
                 return False, f"implausible_rt:{code}"
             found_values.append(found_rt)
@@ -345,7 +358,10 @@ def process_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> d
         ):
             result = alt_result
 
-    return _retry_structural_stop(dataframe, reference_targets, result)
+    result = _retry_structural_stop(dataframe, reference_targets, result)
+    result = joint_clusters.maybe_apply_joint_c22_retry(result)
+    profile = instrument_profiles.profile_from_targets(reference_targets)
+    return instrument_profiles.apply_result_multiplier(result, profile)
 
 
 def process_file(
