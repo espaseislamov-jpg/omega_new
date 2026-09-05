@@ -9,6 +9,7 @@ from .current_engine import (
     process_file,
 )
 from .pipeline import process_from_baseline
+from .instrument_profiles import apply_profile_to_targets, apply_result_multiplier
 
 __all__ = [
     "load_batches",
@@ -16,4 +17,6 @@ __all__ = [
     "process_batch",
     "process_file",
     "process_from_baseline",
+    "apply_profile_to_targets",
+    "apply_result_multiplier",
 ]

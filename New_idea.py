@@ -1,6 +1,8 @@
 """Tkinter GUI for the production Omega chromatogram engine."""
 
+import json
 import re
+import uuid
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
@@ -10,7 +12,7 @@ configure_windows_path_compat()
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -19,15 +21,9 @@ from matplotlib.figure import Figure
 
 import omega_core
 from omega_core import metrics as core_metrics
+from omega_core import instrument_profiles
+from omega_core import rt_profile
 from omega_core.io import ensure_runtime_file
-
-
-PREVIEW_WINDOWS = [
-    ("6.0-7.3", 6.0, 7.3),
-    ("7.4-7.7", 7.4, 7.7),
-    ("8.3-8.7", 8.3, 8.7),
-    ("9.1-9.4", 9.1, 9.4),
-]
 
 
 def _get_x_column_name(df: pd.DataFrame) -> str:
@@ -60,7 +56,7 @@ def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.Da
 class ChromatogramApp:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Omega v2.6 — Chromatogram Peak Detector")
+        self.root.title("Omega v2.7 — Chromatogram Peak Detector")
         screen_width = max(int(self.root.winfo_screenwidth()), 800)
         screen_height = max(int(self.root.winfo_screenheight()), 600)
         self.screen_width = screen_width
@@ -78,7 +74,12 @@ class ChromatogramApp:
         self.root.minsize(min_width, min_height)
 
         self.reference_json_path = ensure_runtime_file("reference_targets_reverted_c22fixed.json")
-        self.reference_targets = omega_core.load_reference_targets(self.reference_json_path)
+        self.base_reference_targets = omega_core.load_reference_targets(self.reference_json_path)
+        self.profile_store = instrument_profiles.load_store(self.base_reference_targets)
+        self.active_instrument_profile = instrument_profiles.active_profile(self.profile_store)
+        self.reference_targets = instrument_profiles.apply_profile_to_targets(
+            self.base_reference_targets, self.active_instrument_profile
+        )
 
         self.current_file = None
         self.current_sample_name = ""
@@ -116,6 +117,9 @@ class ChromatogramApp:
         self.batch_var = tk.StringVar(value="Series: —")
         self.confidence_var = tk.StringVar(value="Качество пиков: —")
         self.current_confidence = None
+        self.profile_var = tk.StringVar(value=self.active_instrument_profile["name"])
+        self.profile_combo = None
+        self.profile_window = None
 
         self._build_ui()
 
@@ -140,6 +144,15 @@ class ChromatogramApp:
         self.batch_results_button = ttk.Button(action_bar, text="Результаты Batch", command=self.open_batch_results_window)
         self.batch_results_button.pack(side="left", padx=(0, 10))
         ttk.Label(action_bar, textvariable=self.batch_var).pack(side="left", padx=(0, 14))
+
+        profile_bar = ttk.Frame(controls)
+        profile_bar.pack(fill="x", pady=(6, 0))
+        ttk.Label(profile_bar, text="Профиль прибора:").pack(side="left", padx=(0, 6))
+        self.profile_combo = ttk.Combobox(profile_bar, textvariable=self.profile_var, state="readonly", width=30)
+        self.profile_combo.pack(side="left", padx=(0, 10))
+        self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_combo_selected)
+        ttk.Button(profile_bar, text="Настроить профили…", command=self.open_profile_manager).pack(side="left")
+        self._refresh_profile_combo()
 
         info_bar = ttk.Frame(controls)
         info_bar.pack(fill="x", pady=(6, 0))
@@ -170,7 +183,7 @@ class ChromatogramApp:
         grid = self.figure.add_gridspec(3, 2, height_ratios=[2.5, 1.0, 1.0], hspace=0.26, wspace=0.18)
         self.ax = self.figure.add_subplot(grid[0, :])
         self.preview_axes = []
-        self.preview_specs = PREVIEW_WINDOWS[:]
+        self.preview_specs = rt_profile.preview_windows(self.reference_targets)
         for index, spec in enumerate(self.preview_specs):
             row = 1 + index // 2
             col = index % 2
@@ -236,7 +249,7 @@ class ChromatogramApp:
             "area": "Площадь",
             "percent_area": "%",
             "code": "Код",
-            "expected_rt": "RT ожид.",
+            "expected_rt": "RT расч.",
             "found_rt": "RT найден",
             "status": "Комментарий",
         }
@@ -341,12 +354,31 @@ class ChromatogramApp:
 
         risk = confidence.get("high_error_risk", {})
         risk_score = risk.get("score", 0) if isinstance(risk, dict) else 0
+        geometry_score = pd.to_numeric(
+            pd.Series([confidence.get("geometry_score")]), errors="coerce"
+        ).iloc[0]
+        emergency_judge = bool(
+            risk.get("instrument_profile_judge_emergency_enabled", False)
+        ) if isinstance(risk, dict) else False
         if risk_score >= 95:
             recommendation = "СТОП: откройте отмеченные пики и переинтегрируйте их вручную"
         elif risk_score >= 85:
-            recommendation = "ПРОВЕРИТЬ: откройте отмеченные пики; при неверной границе переинтегрируйте"
+            recommendation = (
+                "ПРОВЕРИТЬ: экстренный судья нашёл риск крупной ошибки; "
+                "сверьте отмеченные пики"
+                if emergency_judge
+                else "ПРОВЕРИТЬ: откройте отмеченные пики; при неверной границе переинтегрируйте"
+            )
+        elif np.isfinite(geometry_score) and geometry_score < core_metrics.GEOMETRY_STOP_SCORE:
+            recommendation = "СТОП: геометрия пиков требует ручной проверки"
+        elif np.isfinite(geometry_score) and geometry_score < core_metrics.GEOMETRY_READY_SCORE:
+            recommendation = "ПРОВЕРИТЬ: геометрия пиков недостаточно уверенная"
         else:
-            recommendation = "ГОТОВО: по проверкам судьи ручная интеграция не требуется"
+            recommendation = (
+                "ГОТОВО: экстренная проверка не нашла грубых признаков ошибки"
+                if emergency_judge
+                else "ГОТОВО: по проверкам судьи ручная интеграция не требуется"
+            )
         lines = [
             f"Рекомендация: {recommendation}",
             "",
@@ -376,7 +408,7 @@ class ChromatogramApp:
         self.selected_target_code = selection[0] if selection else None
         self.load_selected_integration_bounds(silent=True)
         if self.df_processed is not None:
-            self.update_plot()
+            self.update_plot(preserve_view=True)
             return
 
     def load_selected_integration_bounds(self, silent: bool = False):
@@ -647,6 +679,7 @@ class ChromatogramApp:
         if index < 0 or index >= len(self.loaded_batches):
             return
 
+        preserve_plot_view = self.df_processed is not None
         batch = self.loaded_batches[index]
         self.process_batch(batch)
         self.current_batch_index = index
@@ -660,6 +693,7 @@ class ChromatogramApp:
         self.peaks_df = batch["peaks_df"]
         self.matched_targets_df = batch["matched_targets_df"]
         self.current_rt_shift = batch["rt_shift"]
+        self.preview_specs = rt_profile.preview_windows(self.matched_targets_df)
         available_codes = set(self.matched_targets_df.get("code", pd.Series(dtype=str)).astype(str))
         if self.selected_target_code in available_codes:
             self.load_selected_integration_bounds(silent=True)
@@ -668,7 +702,7 @@ class ChromatogramApp:
             self.manual_start_var.set("")
             self.manual_end_var.set("")
         self.update_batch_navigation()
-        self.refresh_peaks()
+        self.refresh_peaks(preserve_plot_view=preserve_plot_view)
 
     @staticmethod
     def _configure_quality_tags(tree: ttk.Treeview):
@@ -684,18 +718,45 @@ class ChromatogramApp:
             return "ОЖИДАНИЕ — ещё не рассчитано", "quality_pending"
         risk = confidence.get("high_error_risk", {})
         risk_score = risk.get("score", 0) if isinstance(risk, dict) else 0
+        geometry_score = pd.to_numeric(
+            pd.Series([confidence.get("geometry_score")]), errors="coerce"
+        ).iloc[0]
         retry = confidence.get("structural_retry", {})
         if risk_score >= 95:
             return "СТОП — переинтегрировать", "quality_stop"
         if risk_score >= 85:
+            reason_codes = set(risk.get("reason_codes", [])) if isinstance(risk, dict) else set()
+            if "instrument_profile_uncalibrated" in reason_codes:
+                return "ПРОВЕРИТЬ — судья профиля ещё не настроен", "quality_check"
+            if "emergency_profile_geometry" in reason_codes:
+                risky_codes = ", ".join(risk.get("peak_codes", [])) if isinstance(risk, dict) else ""
+                return f"ПРОВЕРИТЬ — экстренно: {risky_codes or 'границы'}", "quality_check"
+            if risk.get("review_priority") == "c22_first":
+                return "ПРОВЕРИТЬ СНАЧАЛА — C22:5, C22:4", "quality_check"
             risky_codes = ", ".join(risk.get("peak_codes", [])) if isinstance(risk, dict) else ""
             suffix = f": {risky_codes}" if risky_codes else " отмеченные пики"
             return f"ПРОВЕРИТЬ{suffix}", "quality_check"
+        if np.isfinite(geometry_score) and geometry_score < core_metrics.GEOMETRY_STOP_SCORE:
+            return "СТОП — ручная проверка пиков", "quality_stop"
+        if np.isfinite(geometry_score) and geometry_score < core_metrics.GEOMETRY_READY_SCORE:
+            return "ПРОВЕРИТЬ — геометрию пиков", "quality_check"
         if isinstance(retry, dict) and retry.get("accepted"):
             return "ГОТОВО — перепроверено автоматически", "quality_good"
+        if isinstance(risk, dict) and risk.get("instrument_profile_judge_emergency_enabled"):
+            return "ГОТОВО — экстренная проверка пройдена", "quality_good"
         return "ГОТОВО — правка не нужна", "quality_good"
 
     def build_batch_results_rows(self, process_all: bool = False):
+        def percent_text(batch: dict, code: str) -> str:
+            matched = batch.get("matched_targets_df")
+            if not isinstance(matched, pd.DataFrame) or matched.empty:
+                return ""
+            row = matched.loc[matched["code"].astype(str) == code]
+            if row.empty:
+                return ""
+            value = pd.to_numeric(row["percent_area"], errors="coerce").iloc[0]
+            return f"{float(value):.4f}" if np.isfinite(value) else ""
+
         rows = []
         for index, batch in enumerate(self.loaded_batches):
             if process_all:
@@ -712,6 +773,9 @@ class ChromatogramApp:
                 batch.get("sample_name", f"Batch {index + 1}"),
                 value_text,
                 confidence_text,
+                percent_text(batch, "C20:4N6"),
+                percent_text(batch, "C18:2N6C"),
+                percent_text(batch, "C18:3N6"),
                 quality_tag,
             ))
         return rows
@@ -732,9 +796,25 @@ class ChromatogramApp:
         for item_id in tree.get_children():
             tree.delete(item_id)
         show_confidence = "confidence" in set(tree["columns"])
-        for index, sample_name, value_text, confidence_text, quality_tag in self.build_batch_results_rows(process_all=process_all):
+        for (
+            index,
+            sample_name,
+            value_text,
+            confidence_text,
+            arachidonic_text,
+            linoleic_text,
+            gamma_linolenic_text,
+            quality_tag,
+        ) in self.build_batch_results_rows(process_all=process_all):
             display_name = self._sample_number(sample_name) if tree is self.batch_results_tree else sample_name
-            values = (display_name, value_text, confidence_text) if show_confidence else (display_name, value_text)
+            values = (
+                display_name,
+                value_text,
+                confidence_text,
+                arachidonic_text,
+                linoleic_text,
+                gamma_linolenic_text,
+            ) if show_confidence else (display_name, value_text)
             tree.insert("", "end", iid=str(index), values=values, tags=(quality_tag,))
         if selected_iid is not None and tree.exists(selected_iid):
             self._batch_tree_syncing = True
@@ -794,8 +874,8 @@ class ChromatogramApp:
 
         self.batch_results_window = tk.Toplevel(self.root)
         self.batch_results_window.title("Batch Results")
-        self.batch_results_window.geometry("860x600")
-        self.batch_results_window.minsize(650, 420)
+        self.batch_results_window.geometry("1200x650")
+        self.batch_results_window.minsize(900, 420)
 
         frame = ttk.Frame(self.batch_results_window, padding=10)
         frame.pack(fill="both", expand=True)
@@ -808,14 +888,27 @@ class ChromatogramApp:
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
-        columns = ("sample_name", "omega_value", "confidence")
+        columns = (
+            "sample_name",
+            "omega_value",
+            "confidence",
+            "arachidonic",
+            "linoleic",
+            "gamma_linolenic",
+        )
         self.batch_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18, selectmode="extended")
         self.batch_results_tree.heading("sample_name", text="Номер образца")
         self.batch_results_tree.heading("omega_value", text="Значение")
         self.batch_results_tree.heading("confidence", text="Проверка")
-        self.batch_results_tree.column("sample_name", width=260, minwidth=140, anchor="w", stretch=True)
+        self.batch_results_tree.heading("arachidonic", text="Арахидоновая, %")
+        self.batch_results_tree.heading("linoleic", text="Линолевая, %")
+        self.batch_results_tree.heading("gamma_linolenic", text="γ-Линоленовая, %")
+        self.batch_results_tree.column("sample_name", width=220, minwidth=130, anchor="w", stretch=True)
         self.batch_results_tree.column("omega_value", width=110, minwidth=80, anchor="center", stretch=False)
-        self.batch_results_tree.column("confidence", width=430, minwidth=260, anchor="w", stretch=True)
+        self.batch_results_tree.column("confidence", width=300, minwidth=220, anchor="w", stretch=True)
+        self.batch_results_tree.column("arachidonic", width=125, minwidth=105, anchor="center", stretch=False)
+        self.batch_results_tree.column("linoleic", width=115, minwidth=95, anchor="center", stretch=False)
+        self.batch_results_tree.column("gamma_linolenic", width=135, minwidth=115, anchor="center", stretch=False)
         self.batch_results_tree.pack(side="left", fill="both", expand=True)
         self._configure_quality_tags(self.batch_results_tree)
 
@@ -836,6 +929,418 @@ class ChromatogramApp:
 
         self.batch_results_window.protocol("WM_DELETE_WINDOW", on_close)
         self.populate_batch_results_tree()
+
+    def _refresh_profile_combo(self):
+        if self.profile_combo is None:
+            return
+        names = [profile["name"] for profile in self.profile_store.get("profiles", [])]
+        self.profile_combo.configure(values=names)
+        self.profile_var.set(self.active_instrument_profile["name"])
+
+    def _profile_by_id(self, profile_id: str):
+        for profile in self.profile_store.get("profiles", []):
+            if str(profile.get("id")) == str(profile_id):
+                return profile
+        return None
+
+    def on_profile_combo_selected(self, event=None):
+        name = self.profile_var.get()
+        profile = next(
+            (item for item in self.profile_store.get("profiles", []) if item.get("name") == name),
+            None,
+        )
+        if profile is None:
+            self.profile_var.set(self.active_instrument_profile["name"])
+            return
+        self.activate_instrument_profile(profile["id"])
+
+    def activate_instrument_profile(self, profile_id: str, force_recalculate: bool = False):
+        profile = self._profile_by_id(profile_id)
+        if profile is None:
+            return False
+        changed = str(profile_id) != str(self.active_instrument_profile.get("id"))
+        if self.loaded_batches and (changed or force_recalculate):
+            confirmed = messagebox.askyesno(
+                "Сменить профиль прибора",
+                "Все загруженные пробы будут последовательно пересчитаны с новым профилем. Продолжить?",
+                parent=self.profile_window if self.profile_window is not None else self.root,
+            )
+            if not confirmed:
+                self.profile_var.set(self.active_instrument_profile["name"])
+                return False
+
+        self.profile_store["active_profile_id"] = str(profile_id)
+        self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
+        self.active_instrument_profile = instrument_profiles.active_profile(self.profile_store)
+        self.reference_targets = instrument_profiles.apply_profile_to_targets(
+            self.base_reference_targets, self.active_instrument_profile
+        )
+        self._refresh_profile_combo()
+        if self.loaded_batches and (changed or force_recalculate):
+            self.recalculate_loaded_batches()
+        else:
+            self.status_var.set(f"Активный профиль: {self.active_instrument_profile['name']}")
+        return True
+
+    def recalculate_loaded_batches(self):
+        if self._preload_after_id is not None:
+            self.root.after_cancel(self._preload_after_id)
+            self._preload_after_id = None
+        preserved = {"file_name", "signal_name", "acquired_at", "source_path", "sample_name", "dataframe"}
+        for batch in self.loaded_batches:
+            for key in list(batch):
+                if key not in preserved:
+                    del batch[key]
+        self.df_processed = None
+        self.peaks_df = pd.DataFrame()
+        self.matched_targets_df = pd.DataFrame()
+        self._preload_batch_index = 0
+        self.show_batch_progress_window()
+        self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
+
+    def open_profile_manager(self):
+        if self.profile_window is not None and self.profile_window.winfo_exists():
+            self.profile_window.deiconify()
+            self.profile_window.lift()
+            return
+
+        window = tk.Toplevel(self.root)
+        self.profile_window = window
+        window.title("Профили приборов и колонок")
+        window.geometry("930x620")
+        window.minsize(760, 500)
+        window.transient(self.root)
+
+        container = ttk.Frame(window, padding=12)
+        container.pack(fill="both", expand=True)
+        panes = ttk.Panedwindow(container, orient="horizontal")
+        panes.pack(fill="both", expand=True)
+        left = ttk.Frame(panes)
+        right = ttk.Frame(panes, padding=(12, 0, 0, 0))
+        panes.add(left, weight=2)
+        panes.add(right, weight=3)
+
+        profile_tree = ttk.Treeview(
+            left,
+            columns=("name", "multiplier", "judge"),
+            show="headings",
+            selectmode="browse",
+        )
+        profile_tree.heading("name", text="Профиль")
+        profile_tree.heading("multiplier", text="Множитель")
+        profile_tree.heading("judge", text="Судья")
+        profile_tree.column("name", width=150, anchor="w")
+        profile_tree.column("multiplier", width=65, anchor="center", stretch=False)
+        profile_tree.column("judge", width=165, anchor="w")
+        profile_tree.pack(fill="both", expand=True)
+
+        left_buttons = ttk.Frame(left)
+        left_buttons.pack(fill="x", pady=(8, 0))
+
+        profile_name_var = tk.StringVar()
+        multiplier_var = tk.StringVar(value="1.0")
+        calculation_labels = {
+            "Совместимый Omega v2.7": instrument_profiles.LEGACY_CALCULATION_MODE,
+            "Прямой расчёт по выбранным площадям": instrument_profiles.DIRECT_COMPONENTS_CALCULATION_MODE,
+        }
+        calculation_mode_var = tk.StringVar(value="Совместимый Omega v2.7")
+        component_codes_var = tk.StringVar(
+            value=", ".join(instrument_profiles.DEFAULT_OMEGA_COMPONENT_CODES)
+        )
+        judge_status_var = tk.StringVar(value="Судья: —")
+        form = ttk.Frame(right)
+        form.pack(fill="x")
+        ttk.Label(form, text="Название").grid(row=0, column=0, sticky="w")
+        name_entry = ttk.Entry(form, textvariable=profile_name_var)
+        name_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Label(form, text="Множитель итогового результата").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        multiplier_entry = ttk.Entry(form, textvariable=multiplier_var, width=14)
+        multiplier_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(form, text="Схема расчёта").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        calculation_combo = ttk.Combobox(
+            form,
+            textvariable=calculation_mode_var,
+            values=list(calculation_labels),
+            state="readonly",
+            width=38,
+        )
+        calculation_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(form, text="Пики числителя через запятую").grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+        component_codes_entry = ttk.Entry(form, textvariable=component_codes_var)
+        component_codes_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
+        ttk.Label(form, text="Калибровка судьи").grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(form, textvariable=judge_status_var).grid(
+            row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0)
+        )
+        form.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            right,
+            text="Времена выхода, мин. Двойной щелчок по строке — изменить RT.",
+        ).pack(fill="x", pady=(12, 5))
+        rt_tree = ttk.Treeview(right, columns=("code", "display", "rt"), show="headings", selectmode="browse")
+        rt_tree.heading("code", text="Код")
+        rt_tree.heading("display", text="Кислота")
+        rt_tree.heading("rt", text="RT, мин")
+        rt_tree.column("code", width=100, anchor="center", stretch=False)
+        rt_tree.column("display", width=245, anchor="w")
+        rt_tree.column("rt", width=100, anchor="center", stretch=False)
+        rt_tree.pack(fill="both", expand=True)
+
+        actions = ttk.Frame(right)
+        actions.pack(fill="x", pady=(8, 0))
+
+        def selected_id():
+            selection = profile_tree.selection()
+            return selection[0] if selection else None
+
+        def load_details(event=None):
+            profile = self._profile_by_id(selected_id()) if selected_id() else None
+            if profile is None:
+                return
+            profile_name_var.set(profile["name"])
+            multiplier_var.set(f"{float(profile.get('result_multiplier', 1.0)):.8g}")
+            mode = str(
+                profile.get(
+                    "calculation_mode", instrument_profiles.LEGACY_CALCULATION_MODE
+                )
+            )
+            calculation_mode_var.set(
+                next(
+                    (label for label, value in calculation_labels.items() if value == mode),
+                    "Совместимый Omega v2.7",
+                )
+            )
+            component_codes_var.set(
+                ", ".join(
+                    profile.get(
+                        "omega_component_codes",
+                        instrument_profiles.DEFAULT_OMEGA_COMPONENT_CODES,
+                    )
+                )
+            )
+            judge_status_var.set(instrument_profiles.judge_calibration_label(profile))
+            for item in rt_tree.get_children():
+                rt_tree.delete(item)
+            names = self.base_reference_targets.set_index("code")["display_name"].to_dict()
+            for code in self.base_reference_targets.sort_values("order_index")["code"].astype(str):
+                value = profile["retention_times"].get(code, np.nan)
+                rt_tree.insert("", "end", iid=code, values=(code, names.get(code, code), f"{float(value):.4f}"))
+            locked = str(profile.get("id")) == instrument_profiles.LEGACY_PROFILE_ID
+            state = "disabled" if locked else "normal"
+            name_entry.configure(state=state)
+            multiplier_entry.configure(state=state)
+            calculation_combo.configure(state="disabled" if locked else "readonly")
+            component_codes_entry.configure(state=state)
+
+        def reload_profiles(select_profile_id=None):
+            for item in profile_tree.get_children():
+                profile_tree.delete(item)
+            active_id = str(self.profile_store.get("active_profile_id"))
+            for profile in self.profile_store.get("profiles", []):
+                marker = "● " if str(profile["id"]) == active_id else ""
+                profile_tree.insert(
+                    "", "end", iid=str(profile["id"]),
+                    values=(
+                        marker + profile["name"],
+                        f"{float(profile.get('result_multiplier', 1.0)):.6g}",
+                        instrument_profiles.judge_calibration_label(profile),
+                    ),
+                )
+            target = str(select_profile_id or active_id)
+            if profile_tree.exists(target):
+                profile_tree.selection_set(target)
+                profile_tree.focus(target)
+                profile_tree.see(target)
+            load_details()
+
+        def edit_rt(event=None):
+            profile = self._profile_by_id(selected_id()) if selected_id() else None
+            selection = rt_tree.selection()
+            if profile is None or not selection:
+                return
+            if str(profile.get("id")) == instrument_profiles.LEGACY_PROFILE_ID:
+                messagebox.showinfo("Встроенный профиль", "Сначала создайте копию встроенного профиля.", parent=window)
+                return
+            code = selection[0]
+            current = float(rt_tree.item(code, "values")[2])
+            value = simpledialog.askfloat(
+                "Время выхода", f"RT для {code}, мин:", initialvalue=current,
+                minvalue=0.001, maxvalue=100.0, parent=window,
+            )
+            if value is not None:
+                values = list(rt_tree.item(code, "values"))
+                values[2] = f"{value:.4f}"
+                rt_tree.item(code, values=values)
+
+        def save_edits():
+            profile_id = selected_id()
+            profile = self._profile_by_id(profile_id) if profile_id else None
+            if profile is None:
+                return False
+            if str(profile_id) == instrument_profiles.LEGACY_PROFILE_ID:
+                messagebox.showinfo("Встроенный профиль", "Встроенный профиль неизменяем. Создайте его копию.", parent=window)
+                return False
+            candidate = dict(profile)
+            candidate["name"] = profile_name_var.get().strip()
+            candidate["result_multiplier"] = multiplier_var.get().strip()
+            candidate["calculation_mode"] = calculation_labels.get(
+                calculation_mode_var.get(), instrument_profiles.LEGACY_CALCULATION_MODE
+            )
+            candidate["omega_component_codes"] = [
+                code.strip()
+                for code in component_codes_var.get().split(",")
+                if code.strip()
+            ]
+            candidate["retention_times"] = {
+                code: rt_tree.item(code, "values")[2] for code in rt_tree.get_children()
+            }
+            try:
+                candidate = instrument_profiles.validate_profile(
+                    candidate, self.base_reference_targets.sort_values("order_index")["code"].astype(str)
+                )
+                duplicate = next(
+                    (item for item in self.profile_store["profiles"]
+                     if item["id"] != profile_id and item["name"].casefold() == candidate["name"].casefold()),
+                    None,
+                )
+                if duplicate is not None:
+                    raise ValueError("Профиль с таким названием уже существует.")
+            except (ValueError, TypeError) as exc:
+                messagebox.showerror("Профиль не сохранён", str(exc), parent=window)
+                return False
+            calibration_inputs_changed = bool(
+                float(candidate.get("result_multiplier", 1.0))
+                != float(profile.get("result_multiplier", 1.0))
+                or candidate.get("calculation_mode") != profile.get("calculation_mode")
+                or candidate.get("omega_component_codes") != profile.get("omega_component_codes")
+                or candidate.get("retention_times") != profile.get("retention_times")
+            )
+            if calibration_inputs_changed:
+                candidate.update({
+                    "judge_calibrated": False,
+                    "judge_manual_samples": 0,
+                    "judge_error_samples": 0,
+                    "judge_validation_batches": 0,
+                    "judge_c22_height_priority_threshold": None,
+                })
+            old_profile = dict(profile)
+            old_profile["retention_times"] = dict(profile["retention_times"])
+            changed_index = None
+            for index, item in enumerate(self.profile_store["profiles"]):
+                if str(item["id"]) == str(profile_id):
+                    self.profile_store["profiles"][index] = candidate
+                    changed_index = index
+                    break
+            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
+            if str(profile_id) == str(self.active_instrument_profile.get("id")):
+                if not self.activate_instrument_profile(profile_id, force_recalculate=True):
+                    if changed_index is not None:
+                        self.profile_store["profiles"][changed_index] = old_profile
+                        self.profile_store = instrument_profiles.save_store(
+                            self.profile_store, self.base_reference_targets
+                        )
+                    return False
+            self._refresh_profile_combo()
+            reload_profiles(profile_id)
+            return True
+
+        def create_profile(copy_selected=False):
+            source = self._profile_by_id(selected_id()) if copy_selected and selected_id() else None
+            default_name = f"{source['name']} — копия" if source else "Новый прибор"
+            name = simpledialog.askstring("Новый профиль", "Название профиля:", initialvalue=default_name, parent=window)
+            if not name:
+                return
+            name = instrument_profiles.unique_profile_name(self.profile_store, name)
+            profile = dict(source) if source else instrument_profiles.new_profile(name, self.base_reference_targets)
+            profile["id"] = str(uuid.uuid4())
+            profile["name"] = name
+            profile["custom_rt"] = True
+            profile["retention_times"] = dict(profile["retention_times"])
+            profile.update({
+                "judge_calibrated": False,
+                "judge_emergency_enabled": False,
+                "judge_target_abs_error": None,
+                "judge_manual_samples": 0,
+                "judge_error_samples": 0,
+                "judge_validation_batches": 0,
+                "judge_c22_height_priority_threshold": None,
+            })
+            self.profile_store["profiles"].append(profile)
+            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
+            reload_profiles(profile["id"])
+            self._refresh_profile_combo()
+
+        def delete_profile():
+            profile_id = selected_id()
+            if not profile_id or profile_id == instrument_profiles.LEGACY_PROFILE_ID:
+                return
+            if str(profile_id) == str(self.profile_store.get("active_profile_id")):
+                messagebox.showerror("Нельзя удалить", "Сначала сделайте активным другой профиль.", parent=window)
+                return
+            profile = self._profile_by_id(profile_id)
+            if not messagebox.askyesno("Удалить профиль", f"Удалить «{profile['name']}»?", parent=window):
+                return
+            self.profile_store["profiles"] = [item for item in self.profile_store["profiles"] if item["id"] != profile_id]
+            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
+            reload_profiles()
+            self._refresh_profile_combo()
+
+        def activate_selected():
+            profile_id = selected_id()
+            if profile_id and self.activate_instrument_profile(profile_id):
+                reload_profiles(profile_id)
+
+        def export_selected():
+            profile = self._profile_by_id(selected_id()) if selected_id() else None
+            if profile is None:
+                return
+            path = filedialog.asksaveasfilename(
+                title="Экспорт профиля", defaultextension=instrument_profiles.PROFILE_FILE_SUFFIX,
+                filetypes=[("Профиль Omega", "*.omega-profile.json"), ("JSON", "*.json")],
+                initialfile=f"{profile['name']}{instrument_profiles.PROFILE_FILE_SUFFIX}", parent=window,
+            )
+            if path:
+                instrument_profiles.export_profile(
+                    profile, Path(path), self.base_reference_targets.sort_values("order_index")["code"].astype(str)
+                )
+
+        def import_one():
+            path = filedialog.askopenfilename(
+                title="Импорт профиля", filetypes=[("Профиль Omega", "*.omega-profile.json *.json"), ("Все файлы", "*.*")],
+                parent=window,
+            )
+            if not path:
+                return
+            try:
+                profile = instrument_profiles.import_profile(Path(path), self.profile_store, self.base_reference_targets)
+                self.profile_store["profiles"].append(profile)
+                self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                messagebox.showerror("Импорт не выполнен", str(exc), parent=window)
+                return
+            reload_profiles(profile["id"])
+            self._refresh_profile_combo()
+
+        profile_tree.bind("<<TreeviewSelect>>", load_details)
+        rt_tree.bind("<Double-1>", edit_rt)
+        ttk.Button(left_buttons, text="Новый", command=lambda: create_profile(False)).pack(side="left")
+        ttk.Button(left_buttons, text="Копия", command=lambda: create_profile(True)).pack(side="left", padx=(6, 0))
+        ttk.Button(left_buttons, text="Удалить", command=delete_profile).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="Изменить RT", command=edit_rt).pack(side="left")
+        ttk.Button(actions, text="Сохранить", command=save_edits).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="Сделать активным", command=activate_selected).pack(side="left", padx=(6, 0))
+        ttk.Button(actions, text="Импорт", command=import_one).pack(side="right")
+        ttk.Button(actions, text="Экспорт", command=export_selected).pack(side="right", padx=(0, 6))
+
+        def on_close():
+            window.destroy()
+            self.profile_window = None
+
+        window.protocol("WM_DELETE_WINDOW", on_close)
+        reload_profiles()
 
     def open_file(self):
         file_path = filedialog.askopenfilename(title="Выберите CSV", filetypes=[("CSV", "*.csv *.CSV"), ("All", "*.*")])
@@ -937,17 +1442,26 @@ class ChromatogramApp:
         if self.df_processed is None:
             return
         current_batch = self.loaded_batches[self.current_batch_index] if self.loaded_batches else None
-        omega = core_metrics.compute_omega(self.matched_targets_df)
+        self.matched_targets_df = core_metrics.annotate_peak_heights(
+            self.df_processed,
+            self.matched_targets_df,
+        )
+        raw_omega = core_metrics.compute_omega(self.matched_targets_df)
         baseline_mode = current_batch.get("baseline_mode", "chebyshev") if current_batch is not None else "chebyshev"
         cluster_quality_score = core_metrics.compute_cluster_quality(self.matched_targets_df)
         confidence = core_metrics.assess_confidence(
             self.matched_targets_df,
             self.peaks_df,
-            omega,
+            raw_omega,
             baseline_mode,
             cluster_quality_score,
         )
-        report_value = omega["omega3_trio"]
+        scaled_result = instrument_profiles.apply_result_multiplier(
+            {"omega": raw_omega, "omega_report": raw_omega["omega3_trio"]},
+            self.active_instrument_profile,
+        )
+        omega = scaled_result["omega"]
+        report_value = scaled_result["omega_report"]
         if current_batch is not None:
             current_batch["processed_df"] = self.df_processed
             current_batch["best_window"] = self.best_window
@@ -955,7 +1469,11 @@ class ChromatogramApp:
             current_batch["matched_targets_df"] = self.matched_targets_df
             current_batch["rt_shift"] = self.current_rt_shift
             current_batch["omega"] = omega
-            current_batch["omega_report"] = omega["omega3_trio"]
+            current_batch["omega_report"] = report_value
+            current_batch["omega_report_unscaled"] = scaled_result["omega_report_unscaled"]
+            current_batch["instrument_profile_id"] = self.active_instrument_profile["id"]
+            current_batch["instrument_profile_name"] = self.active_instrument_profile["name"]
+            current_batch["result_multiplier"] = self.active_instrument_profile["result_multiplier"]
             current_batch["cluster_quality_score"] = cluster_quality_score
             current_batch["confidence"] = confidence
             report_value = current_batch["omega_report"]
@@ -987,8 +1505,17 @@ class ChromatogramApp:
             self.update_plot(preserve_view=preserve_plot_view)
         self.update_table()
 
+        local_shifts = pd.to_numeric(
+            self.matched_targets_df.get("rt_local_shift", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        if not local_shifts.empty and bool(self.matched_targets_df.get(
+            "instrument_profile_custom_rt", pd.Series(dtype=bool)
+        ).fillna(False).any()):
+            rt_text = f"RT correction: {local_shifts.iloc[0]:+.3f}…{local_shifts.iloc[-1]:+.3f} min"
+        else:
+            rt_text = f"RT shift: {self.current_rt_shift:+.3f} min"
         self.status_var.set(
-            f"RT shift: {self.current_rt_shift:+.3f} min | matched {int(self.matched_targets_df['matched_peak_id'].notna().sum())}/{len(self.reference_targets)}"
+            f"{rt_text} | matched {int(self.matched_targets_df['matched_peak_id'].notna().sum())}/{len(self.reference_targets)}"
         )
         self.integration_var.set(
             f"Integration: {len(self.peaks_df)} peaks | SG {self.best_window}"
@@ -1325,12 +1852,24 @@ class ChromatogramApp:
             spine.set_color("#b8c2cc")
             spine.set_linewidth(0.8)
 
+    @staticmethod
+    def _capture_axes_views(axes):
+        return [
+            (tuple(axis.get_xlim()), tuple(axis.get_ylim()))
+            for axis in axes
+        ]
+
+    @staticmethod
+    def _restore_axes_views(axes, saved_views):
+        if len(saved_views) != len(axes):
+            return
+        for axis, (x_limits, y_limits) in zip(axes, saved_views):
+            axis.set_xlim(*x_limits)
+            axis.set_ylim(*y_limits)
+
     def update_plot(self, preserve_view: bool = False):
         axes = [self.ax, *getattr(self, "preview_axes", [])]
-        saved_views = []
-        if preserve_view:
-            for axis in axes:
-                saved_views.append((axis.get_xlim(), axis.get_ylim()))
+        saved_views = self._capture_axes_views(axes) if preserve_view else []
         x_col = _get_x_column_name(self.df_processed)
         x = self.df_processed[x_col].to_numpy(dtype=float)
         y = self.df_processed["y_corrected"].to_numpy(dtype=float)
@@ -1370,10 +1909,8 @@ class ChromatogramApp:
                 compact=True,
                 normalized=True,
             )
-        if preserve_view and len(saved_views) == len(axes):
-            for axis, (x_limits, y_limits) in zip(axes, saved_views):
-                axis.set_xlim(*x_limits)
-                axis.set_ylim(*y_limits)
+        if preserve_view:
+            self._restore_axes_views(axes, saved_views)
         self.canvas.draw_idle()
 
     def update_table(self):
@@ -1398,7 +1935,8 @@ class ChromatogramApp:
                 area_text,
                 "" if pd.isna(row.get("percent_area")) else f"{row['percent_area']:.2f}",
                 row.get("code", ""),
-                "" if pd.isna(row.get("expected_rt")) else f"{row['expected_rt']:.4f}",
+                "" if pd.isna(row.get("corrected_target_rt", row.get("expected_rt")))
+                else f"{float(row.get('corrected_target_rt', row.get('expected_rt'))):.4f}",
                 "" if pd.isna(row.get("found_rt")) else f"{row['found_rt']:.4f}",
                 row.get("status", ""),
             )

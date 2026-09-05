@@ -5,6 +5,8 @@ import itertools
 import numpy as np
 import pandas as pd
 
+from . import rt_profile
+
 
 RELIABLE_RT_WINDOW = 0.035
 RELIABLE_RT_DOMINANT_DISTANCE_MAX = 0.025
@@ -40,6 +42,73 @@ def estimate_rt_shift(
         if score > best_score:
             best_score, best_shift = score, float(shift)
     return best_shift
+
+
+def estimate_profile_rt_calibration(
+    expected_rts: np.ndarray,
+    observed_rts: np.ndarray,
+) -> tuple[np.ndarray, float, float]:
+    """Fit a guarded gradual RT correction for a custom instrument profile.
+
+    A chromatogram may drift a little more at its right edge than at its left.
+    The legacy matcher used one additive shift for the whole run.  For a custom
+    profile we first obtain that safe coarse shift, then fit a robust affine
+    correction from nearby detected peaks.  The slope is tightly constrained;
+    ambiguous or insufficient anchors fall back to the old additive behavior.
+    """
+    expected = np.asarray(expected_rts, dtype=float)
+    observed = np.asarray(observed_rts, dtype=float)
+    coarse_shift = estimate_rt_shift(expected, observed)
+    fallback = expected + coarse_shift
+    if expected.size < 4 or observed.size < 4:
+        return fallback, 1.0, float(coarse_shift)
+
+    candidates: list[tuple[float, float, float, int]] = []
+    for target in expected:
+        distances = np.abs(observed - (target + coarse_shift))
+        position = int(np.argmin(distances))
+        distance = float(distances[position])
+        if distance <= 0.060:
+            candidates.append((float(target), float(observed[position]), distance, position))
+
+    # One observed peak may be nearest to several coarse/rounded profile RTs.
+    # Keep only its closest target so a collapsed cluster cannot define a warp.
+    best_by_observed: dict[int, tuple[float, float, float, int]] = {}
+    for candidate in candidates:
+        old = best_by_observed.get(candidate[3])
+        if old is None or candidate[2] < old[2]:
+            best_by_observed[candidate[3]] = candidate
+    anchors = list(best_by_observed.values())
+    if len(anchors) < 4:
+        return fallback, 1.0, float(coarse_shift)
+
+    x = np.asarray([item[0] for item in anchors], dtype=float)
+    y = np.asarray([item[1] for item in anchors], dtype=float)
+    if float(np.ptp(x)) < 1.0:
+        return fallback, 1.0, float(coarse_shift)
+
+    keep = np.ones(len(x), dtype=bool)
+    slope, intercept = 1.0, float(coarse_shift)
+    for _ in range(3):
+        if int(keep.sum()) < 4:
+            return fallback, 1.0, float(coarse_shift)
+        slope, intercept = np.polyfit(x[keep], y[keep], 1)
+        if not (0.985 <= slope <= 1.015):
+            return fallback, 1.0, float(coarse_shift)
+        residual = y - (slope * x + intercept)
+        center = float(np.median(residual[keep]))
+        mad = float(np.median(np.abs(residual[keep] - center)))
+        tolerance = max(0.008, 3.5 * 1.4826 * mad)
+        new_keep = np.abs(residual - center) <= tolerance
+        if np.array_equal(new_keep, keep):
+            break
+        keep = new_keep
+
+    intercept = float(np.median(y[keep] - slope * x[keep]))
+    calibrated = slope * expected + intercept
+    if np.max(np.abs(calibrated - fallback)) > 0.050:
+        return fallback, 1.0, float(coarse_shift)
+    return calibrated, float(slope), intercept
 
 
 def _clear_match(out: pd.DataFrame, row_idx: int) -> None:
@@ -197,7 +266,13 @@ def apply_c22_cluster_override(
     peaks_prominence = peaks["prominence"].to_numpy(dtype=float)
     peaks_area = peaks["area"].to_numpy(dtype=float)
     cluster_codes = ["C22:6", "C22:5", "C22:4"]
-    target_apexes = [9.252, 9.285, 9.316]
+    fallback_apexes = [9.252, 9.285, 9.316]
+    custom_profile = rt_profile.uses_custom_instrument_profile(out)
+    target_apexes = rt_profile.target_centers(
+        out, cluster_codes, fallback_apexes, corrected=custom_profile
+    )
+    if custom_profile:
+        rt_shift = 0.0
     max_distances = [0.020, 0.020, 0.020]
 
     # Assign the whole ordered cluster at once.  A greedy left-to-right pass can
@@ -288,7 +363,24 @@ def match_targets_to_peaks(
     peak_area = peaks["area"].to_numpy(dtype=float)
     refs = targets[targets["rt_reliable"] & targets["expected_rt"].notna()]
     shift = estimate_rt_shift(refs["expected_rt"].to_numpy(dtype=float), peak_apex) if not refs.empty else 0.0
-    targets["corrected_target_rt"] = targets["expected_rt"] + shift
+    if rt_profile.uses_custom_instrument_profile(targets) and not refs.empty:
+        _, calibration_slope, calibration_intercept = estimate_profile_rt_calibration(
+            refs["expected_rt"].to_numpy(dtype=float), peak_apex
+        )
+        # Every custom-profile row has an RT. Apply the same smooth curve even
+        # if a future profile deliberately marks a row as soft.
+        targets["corrected_target_rt"] = (
+            calibration_slope * targets["expected_rt"] + calibration_intercept
+        )
+        targets["rt_calibration_slope"] = calibration_slope
+        targets["rt_calibration_intercept"] = calibration_intercept
+        targets["rt_local_shift"] = targets["corrected_target_rt"] - targets["expected_rt"]
+        shift = float(pd.to_numeric(targets["rt_local_shift"], errors="coerce").median())
+    else:
+        targets["corrected_target_rt"] = targets["expected_rt"] + shift
+        targets["rt_calibration_slope"] = 1.0
+        targets["rt_calibration_intercept"] = shift
+        targets["rt_local_shift"] = shift
 
     out = targets.copy()
     out["found_rt"] = np.nan
@@ -310,7 +402,11 @@ def match_targets_to_peaks(
             continue
         local_positions = candidate_positions[distances[candidate_positions] <= RELIABLE_RT_WINDOW]
         if local_positions.size == 0:
-            if strict or str(out.at[i, "code"]) in NO_NEAREST_FALLBACK_CODES:
+            if (
+                strict
+                or rt_profile.uses_custom_instrument_profile(out)
+                or str(out.at[i, "code"]) in NO_NEAREST_FALLBACK_CODES
+            ):
                 continue
             best_pos = int(candidate_positions[np.argmin(distances[candidate_positions])])
             best_distance = float(distances[best_pos])
@@ -353,24 +449,50 @@ def match_targets_to_peaks(
         used_mask[best_pos] = True
         _assign_peak(out, i, peaks.iloc[best_pos], "matched_order", 0.0)
 
+    custom_profile = rt_profile.uses_custom_instrument_profile(out)
+    c18_apexes = rt_profile.target_centers(
+        out,
+        ["C18:1N9C", "C18:3N3", "C18:0"],
+        [7.623, 7.650, 7.750],
+        corrected=custom_profile,
+    )
+    c20_apexes = rt_profile.target_centers(
+        out,
+        ["C20:4N6", "C20:5", "C20:3N8"],
+        [8.381, 8.410, 8.467],
+        corrected=custom_profile,
+    )
+    cluster_shift = 0.0 if custom_profile else shift
+    if not custom_profile:
+        # The legacy JSON contains duplicated/placeholder C20 RTs.  Matching
+        # has always used the three resolved cluster centres below, so expose
+        # those same shifted centres to the GUI and diagnostics instead of
+        # displaying the unrelated JSON values as the calculated markup.
+        for code, center in zip(
+            ["C20:4N6", "C20:5", "C20:3N8"],
+            c20_apexes,
+        ):
+            rows = out.index[out["code"] == code]
+            if len(rows):
+                out.at[int(rows[0]), "corrected_target_rt"] = float(center + cluster_shift)
     out = _apply_target_cluster_override(
         out,
         peaks_df,
         cluster_codes=["C18:1N9C", "C18:3N3", "C18:0"],
-        target_apexes=[7.623, 7.650, 7.750],
+        target_apexes=c18_apexes,
         max_distance=0.025,
         status="matched_c18_rule",
-        rt_shift=shift,
+        rt_shift=cluster_shift,
     )
     out = _apply_target_cluster_override(
         out,
         peaks_df,
         cluster_codes=["C20:4N6", "C20:5", "C20:3N8"],
-        target_apexes=[8.381, 8.410, 8.467],
+        target_apexes=c20_apexes,
         max_distance=[0.025, 0.018, 0.025],
         status="matched_c20_rule",
-        rt_shift=shift,
+        rt_shift=cluster_shift,
         min_apex_gaps=[0.016, 0.020],
     )
-    out = apply_c22_cluster_override(out, peaks_df, rt_shift=shift)
+    out = apply_c22_cluster_override(out, peaks_df, rt_shift=cluster_shift)
     return out, shift

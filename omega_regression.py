@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 
 import omega_core
-from omega_core import metrics, pipeline, signal
+from omega_core import metrics, pipeline, rt_profile, signal
 
 
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -217,6 +217,13 @@ def _extract_result_features(result: dict) -> dict:
         "rt_shift": _safe_float(result.get("rt_shift")),
         "best_window": result.get("best_window", np.nan),
     }
+    production_risk = confidence.get("high_error_risk", {}) if isinstance(confidence, dict) else {}
+    if isinstance(production_risk, dict) and production_risk:
+        features["production_judge_score"] = int(production_risk.get("score", 0))
+        features["production_judge_band"] = str(production_risk.get("band", "LOW_RISK"))
+        features["production_judge_reason_codes"] = ",".join(
+            str(code) for code in production_risk.get("reason_codes", [])
+        )
     for key, value in omega.items():
         if isinstance(value, (bool, np.bool_)):
             features[f"omega_{key}"] = bool(value)
@@ -242,6 +249,7 @@ def _extract_result_features(result: dict) -> dict:
             end_x = _safe_float(row.get("integration_end_x")) if row is not None else np.nan
             width = _target_width(matched, code)
             features[f"{slug}_area"] = _safe_float(row.get("area")) if row is not None else np.nan
+            features[f"{slug}_height_smooth"] = _safe_float(row.get("peak_height_smooth")) if row is not None else np.nan
             features[f"{slug}_found_rt"] = found_rt
             features[f"{slug}_expected_rt"] = expected_rt
             features[f"{slug}_corrected_target_rt"] = corrected_target_rt
@@ -256,6 +264,30 @@ def _extract_result_features(result: dict) -> dict:
             for profile_col in ["manual_table_rt", "rt_profile_anchor_coefficient", "rt_profile_coefficient", "rt_profile_expected_rt", "rt_profile_delta_to_anchor"]:
                 features[f"{slug}_{profile_col}"] = _safe_float(row.get(profile_col)) if row is not None else np.nan
             features[f"{slug}_status"] = _target_status(matched, code)
+        profile_row = matched.iloc[0]
+        custom_profile = rt_profile.uses_custom_instrument_profile(matched)
+        features["instrument_profile_custom_rt"] = custom_profile
+        features["instrument_profile_judge_calibrated"] = bool(
+            profile_row.get("instrument_profile_judge_calibrated", not custom_profile)
+        )
+        features["C22_height_priority_threshold"] = _safe_float(
+            profile_row.get("instrument_profile_c22_height_priority_threshold")
+        )
+        c22_5_height = _safe_float(features.get("C22_5_height_smooth"))
+        c22_4_height = _safe_float(features.get("C22_4_height_smooth"))
+        features["C22_height_ratio"] = (
+            c22_5_height / c22_4_height
+            if np.isfinite(c22_5_height) and np.isfinite(c22_4_height) and c22_4_height > 0
+            else np.nan
+        )
+        c20_row = _target_row(matched, "C20:3N8")
+        c20_judge_target = _safe_float(c20_row.get("corrected_target_rt")) if c20_row is not None else np.nan
+        if c20_row is not None and not custom_profile:
+            expected_rt = _safe_float(c20_row.get("expected_rt"))
+            local_shift = _safe_float(c20_row.get("rt_local_shift"))
+            if np.isfinite(expected_rt) and np.isfinite(local_shift):
+                c20_judge_target = expected_rt + local_shift
+        features["C20_3N8_judge_target_rt"] = c20_judge_target
     return features
 
 
@@ -420,6 +452,22 @@ def _legacy_safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
 
 def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
     """Return the same high-recall warning used by the production GUI."""
+    production_score = _safe_float(row.get("production_judge_score"))
+    if np.isfinite(production_score):
+        reason_codes = str(row.get("production_judge_reason_codes", "") or "")
+        if "missing_key_peak" in reason_codes:
+            direction = "likely_under_missing_peak"
+        elif "duplicate_peak_assignment" in reason_codes:
+            direction = "identity_conflict"
+        else:
+            direction = "unknown"
+        return (
+            int(production_score),
+            str(row.get("production_judge_band", "LOW_RISK")),
+            direction,
+            reason_codes,
+        )
+
     missing_key_peaks = []
     for code in ["C20_5", "C22_6", "C22_5"]:
         area = _safe_float(row.get(f"{code}_area"))
@@ -432,6 +480,9 @@ def safety_judge(row: dict | pd.Series) -> tuple[int, str, str, str]:
         duplicate_peak_codes = ["назначения пиков"]
 
     features = dict(row)
+    judge_target_rt = _safe_float(row.get("C20_3N8_judge_target_rt"))
+    if np.isfinite(judge_target_rt):
+        features["C20_3N8_corrected_target_rt"] = judge_target_rt
     features["missing_key_peaks"] = missing_key_peaks
     features["duplicate_peak_codes"] = duplicate_peak_codes
     risk = metrics.classify_high_error_risk(features)
