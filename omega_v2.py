@@ -111,12 +111,22 @@ def main() -> int:
             root.update()
             if "--smoke-csv" in sys.argv:
                 csv_path = Path(sys.argv[sys.argv.index("--smoke-csv") + 1])
-                batches = omega_core.load_batches(csv_path)
-                if not batches:
-                    raise RuntimeError("Smoke test CSV contains no batches")
-                result = process_chromatogram_batch(batches[0]["dataframe"], app.reference_targets)
-                if result["matched_targets_df"].empty:
-                    raise RuntimeError("Smoke test produced no target rows")
+                import time
+                import New_idea as gui
+                errors = []
+                root.report_callback_exception = lambda kind, value, tb: errors.append("".join(traceback.format_exception(kind, value, tb)))
+                gui.filedialog.askopenfilename = lambda **kwargs: str(csv_path)
+                gui.messagebox.showerror = lambda title, message, **kwargs: errors.append(str(title) + ": " + str(message))
+                app.open_file()
+                deadline = time.monotonic() + 100
+                while app.df_processed is None and not errors and time.monotonic() < deadline:
+                    root.update()
+                    time.sleep(0.02)
+                root.update()
+                if errors:
+                    raise RuntimeError("\n".join(errors))
+                if app.df_processed is None or not app.tree.get_children():
+                    raise RuntimeError("CSV button did not populate the GUI")
             print("OMEGA_SMOKE_OK", flush=True)
         finally:
             root.destroy()

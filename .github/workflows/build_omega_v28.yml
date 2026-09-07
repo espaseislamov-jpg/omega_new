@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/build_omega_v28.yml'
       - 'installer/omega_v2.iss'
+      - 'omega_v2.py'
+      - 'New_idea.py'
   workflow_dispatch:
 
 permissions:
