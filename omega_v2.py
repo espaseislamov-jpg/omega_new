@@ -5,6 +5,7 @@ import os
 import runpy
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
@@ -100,9 +101,52 @@ def main() -> int:
     os.environ.setdefault("OMEGA_APP_NAME", APP_NAME)
     configure_windows_path_compat()
     _install_requirements_if_needed()
-    runpy.run_module("New_idea", run_name="__main__")
+    if "--smoke-test" in sys.argv:
+        import tkinter as tk
+        from New_idea import ChromatogramApp, process_chromatogram_batch
+        import omega_core
+        root = tk.Tk()
+        try:
+            app = ChromatogramApp(root)
+            root.update()
+            if "--smoke-csv" in sys.argv:
+                csv_path = Path(sys.argv[sys.argv.index("--smoke-csv") + 1])
+                batches = omega_core.load_batches(csv_path)
+                if not batches:
+                    raise RuntimeError("Smoke test CSV contains no batches")
+                result = process_chromatogram_batch(batches[0]["dataframe"], app.reference_targets)
+                if result["matched_targets_df"].empty:
+                    raise RuntimeError("Smoke test produced no target rows")
+            print("OMEGA_SMOKE_OK", flush=True)
+        finally:
+            root.destroy()
+    else:
+        runpy.run_module("New_idea", run_name="__main__")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # A windowed executable has no console. Keep startup failures observable.
+    log_root = Path(os.environ.get("LOCALAPPDATA", str(_app_dir()))) / "Omega" / "logs"
+    log_root.mkdir(parents=True, exist_ok=True)
+    log_path = log_root / "startup.log"
+    with log_path.open("w", encoding="utf-8", buffering=1) as log:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        if getattr(sys, "frozen", False):
+            sys.stdout = sys.stderr = log
+        try:
+            print("Starting Omega", sys.executable, flush=True)
+            exit_code = main()
+        except Exception:
+            traceback.print_exc(file=log)
+            log.flush()
+            if "--smoke-test" not in sys.argv:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(None, "Не удалось запустить Omega. Подробности:\n" + str(log_path), "Ошибка запуска Omega", 16)
+                except Exception:
+                    pass
+            exit_code = 1
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+    raise SystemExit(exit_code)

@@ -39,6 +39,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (!(Test-Path installer_output/omega_v2.8_setup.exe)) { throw "Installer missing" }
           Get-FileHash installer_output/omega_v2.8_setup.exe -Algorithm SHA256 | Format-List
+      - name: Verify installed application and CSV processing
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:RUNNER_TEMP 'Омега проверка'
+          $setup = Start-Process -FilePath installer_output/omega_v2.8_setup.exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', ('/DIR="' + $installDir + '"')) -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Setup failed: $($setup.ExitCode)" }
+          $csv = Join-Path $env:GITHUB_WORKSPACE 'data/regression/25032026.CSV'
+          $app = Start-Process -FilePath (Join-Path $installDir 'omega_v2.exe') -WorkingDirectory $env:RUNNER_TEMP -ArgumentList @('--smoke-test', '--smoke-csv', ('"' + $csv + '"')) -PassThru
+          if (!$app.WaitForExit(120000)) { Stop-Process -Id $app.Id; throw 'Application startup timed out' }
+          $log = Join-Path $env:LOCALAPPDATA 'Omega/logs/startup.log'
+          if (Test-Path $log) { Get-Content $log }
+          if ($app.ExitCode -ne 0) { throw "Application failed: $($app.ExitCode)" }
+          if (!(Test-Path $log) -or !(Select-String -Path $log -Pattern 'OMEGA_SMOKE_OK' -Quiet)) { throw 'Application did not finish its smoke test' }
       - name: Upload setup
         uses: actions/upload-artifact@v4
         with:
