@@ -1,0 +1,48 @@
+name: Build Omega 2.8 Windows setup
+
+on:
+  push:
+    branches: [fix/peak-boundaries-profile-continuity]
+    paths:
+      - '.github/workflows/build_omega_v28.yml'
+      - 'installer/omega_v2.iss'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-setup:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install runtime and packaging dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-chromatopy.txt
+          python -m pip install "pyinstaller>=6,<7"
+      - name: Run regression unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Build application
+        run: python scripts/build_omega_v2.py --skip-deps
+      - name: Compile installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $compiler)) { throw "Inno Setup compiler not found" }
+          & $compiler installer/omega_v2.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (!(Test-Path installer_output/omega_v2.8_setup.exe)) { throw "Installer missing" }
+          Get-FileHash installer_output/omega_v2.8_setup.exe -Algorithm SHA256 | Format-List
+      - name: Upload setup
+        uses: actions/upload-artifact@v4
+        with:
+          name: omega_v2.8_windows_setup
+          path: installer_output/omega_v2.8_setup.exe
+          if-no-files-found: error
+          retention-days: 30
