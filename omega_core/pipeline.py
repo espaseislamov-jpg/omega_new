@@ -23,6 +23,7 @@ def process_from_baseline(
     )
     matched_targets = chromatopy_adapter.apply_chromatopy_target_integration(processed, matched_targets)
     peaks, matched_targets = clusters.refine_cluster_matches(processed, peaks, matched_targets)
+    boundary_history = list(matched_targets.attrs.get("boundary_history", []))
     matched_targets = rt_profile.annotate_rt_profile(matched_targets)
     matched_targets = metrics.annotate_peak_heights(processed, matched_targets)
     omega = metrics.compute_omega(matched_targets)
@@ -33,6 +34,7 @@ def process_from_baseline(
         "peaks_df": peaks,
         "matched_targets_df": matched_targets,
         "judge_decisions_df": pd.DataFrame(judge_decisions),
+        "boundary_history": boundary_history,
         "rt_shift": rt_shift,
         "omega": omega,
         "omega_report": omega["omega3_trio"],

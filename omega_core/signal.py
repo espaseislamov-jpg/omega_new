@@ -162,20 +162,25 @@ def _merge_peak_records(peaks_df: pd.DataFrame, extra_records) -> pd.DataFrame:
         out = pd.DataFrame(base_records, columns=PEAK_RECORD_COLUMNS)
         return out.sort_values("apex_x").reset_index(drop=True)
 
-    merged_records = list(base_records)
+    # Supplemental detectors may add missing peaks, but must not silently
+    # replace an accepted primary peak just because their RT is slightly earlier.
+    deduped = list(base_records)
+    supplemental = []
     for record in extra_records:
         item = {column: record.get(column, np.nan) for column in PEAK_RECORD_COLUMNS}
-        merged_records.append(item)
-
-    merged_records.sort(key=lambda row: (float(row["apex_x"]), -float(row["area"])))
-    deduped = []
-    last_apex = None
-    for row in merged_records:
+        supplemental.append(item)
+    def strength(row):
+        value = float(row.get("prominence", 0.0))
+        return value if np.isfinite(value) else 0.0
+    supplemental.sort(key=lambda row: (-strength(row), float(row["apex_x"])))
+    for row in supplemental:
         apex_x = float(row["apex_x"])
-        if last_apex is not None and abs(apex_x - last_apex) <= 0.006:
+        if not np.isfinite(apex_x):
+            continue
+        if any(abs(apex_x - float(existing["apex_x"])) <= 0.006 for existing in deduped):
             continue
         deduped.append(row)
-        last_apex = apex_x
+    deduped.sort(key=lambda row: float(row["apex_x"]))
 
     if not deduped:
         return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
@@ -569,7 +574,7 @@ def detect_peak_candidates(
         width=min_width,
     )
     if peaks.size == 0:
-        return pd.DataFrame(columns=["peak_id", "start_x", "apex_x", "end_x", "area", "percent_area"])
+        return _augment_detected_peaks(df, pd.DataFrame(columns=PEAK_RECORD_COLUMNS), reference_targets)
 
     widths = peak_widths(y_smooth, peaks, rel_height=rel_height)
     left_ips = widths[2]
@@ -634,7 +639,7 @@ def detect_peak_candidates(
         })
 
     if not records:
-        return pd.DataFrame(columns=["peak_id", "start_x", "apex_x", "end_x", "area", "percent_area"])
+        return _augment_detected_peaks(df, pd.DataFrame(columns=PEAK_RECORD_COLUMNS), reference_targets)
 
     peaks_df = pd.DataFrame(records).sort_values("apex_x").reset_index(drop=True)
     if peaks_df.empty:
@@ -644,6 +649,11 @@ def detect_peak_candidates(
     total_area = float(peaks_df["area"].sum())
     peaks_df["percent_area"] = 100.0 * peaks_df["area"] / total_area if total_area > 0 else np.nan
 
+    return _augment_detected_peaks(df, peaks_df, reference_targets)
+
+
+def _augment_detected_peaks(df, peaks_df, reference_targets):
+    """Recovery must also run when the primary detector rejects every peak."""
     peaks_df = augment_targeted_cluster_peaks(df, peaks_df, reference_targets=reference_targets)
     pyopenms_peaks_df = detect_peaks_with_pyopenms(df)
     if not pyopenms_peaks_df.empty:

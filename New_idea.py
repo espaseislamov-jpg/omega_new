@@ -137,6 +137,7 @@ class ChromatogramApp:
         self.confidence_button.pack(side="right")
         self.confidence_button.state(["disabled"])
         ttk.Button(action_bar, text="Открыть CSV", command=self.open_file).pack(side="left", padx=(0, 10))
+        ttk.Button(action_bar, text="История границ", command=self.export_boundary_history).pack(side="left", padx=(0, 10))
         self.prev_button = ttk.Button(action_bar, text="←", width=4, command=self.prev_batch)
         self.prev_button.pack(side="left", padx=(0, 4))
         self.next_button = ttk.Button(action_bar, text="→", width=4, command=self.next_batch)
@@ -302,6 +303,33 @@ class ChromatogramApp:
         status.pack(fill="x")
         self.update_batch_navigation()
         self.root.after_idle(self._apply_responsive_pane_positions)
+
+    def export_boundary_history(self):
+        if not self.loaded_batches:
+            messagebox.showinfo("История границ", "Сначала откройте CSV.", parent=self.root)
+            return
+        batch = self.loaded_batches[self.current_batch_index]
+        path = filedialog.asksaveasfilename(
+            parent=self.root, title="Сохранить историю автоматических границ",
+            defaultextension=".json", initialfile="omega_boundary_history.json",
+            filetypes=[("JSON", "*.json")],
+        )
+        if not path:
+            return
+        payload = {
+            "scope": "automatic_cluster_refinement_before_manual_edits",
+            "sample": self.current_sample_name,
+            "profile": self.active_instrument_profile,
+            "baseline_mode": batch.get("baseline_mode"),
+            "changes": batch.get("boundary_history", []),
+        }
+        try:
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("История границ", str(exc), parent=self.root)
+            return
+        self.status_var.set("История автоматических границ сохранена.")
 
     def _apply_responsive_pane_positions(self):
         """Give the plot and both sidebar sections useful space on this screen."""
@@ -1197,6 +1225,14 @@ class ChromatogramApp:
             candidate["retention_times"] = {
                 code: rt_tree.item(code, "values")[2] for code in rt_tree.get_children()
             }
+            # Preserve full precision when the operator did not edit a cell.
+            for code, value in candidate["retention_times"].items():
+                original = float(profile["retention_times"][code])
+                if float(value) == float(f"{original:.4f}"):
+                    candidate["retention_times"][code] = original
+            if any(float(value) != float(profile["retention_times"][code])
+                   for code, value in candidate["retention_times"].items()):
+                candidate["custom_rt"] = True
             try:
                 candidate = instrument_profiles.validate_profile(
                     candidate, self.base_reference_targets.sort_values("order_index")["code"].astype(str)
@@ -1221,6 +1257,7 @@ class ChromatogramApp:
             if calibration_inputs_changed:
                 candidate.update({
                     "judge_calibrated": False,
+                    "judge_emergency_enabled": False,
                     "judge_manual_samples": 0,
                     "judge_error_samples": 0,
                     "judge_validation_batches": 0,
@@ -1254,20 +1291,10 @@ class ChromatogramApp:
             if not name:
                 return
             name = instrument_profiles.unique_profile_name(self.profile_store, name)
-            profile = dict(source) if source else instrument_profiles.new_profile(name, self.base_reference_targets)
-            profile["id"] = str(uuid.uuid4())
-            profile["name"] = name
-            profile["custom_rt"] = True
-            profile["retention_times"] = dict(profile["retention_times"])
-            profile.update({
-                "judge_calibrated": False,
-                "judge_emergency_enabled": False,
-                "judge_target_abs_error": None,
-                "judge_manual_samples": 0,
-                "judge_error_samples": 0,
-                "judge_validation_batches": 0,
-                "judge_c22_height_priority_threshold": None,
-            })
+            profile = (
+                instrument_profiles.copy_profile(source, name)
+                if source else instrument_profiles.new_profile(name, self.base_reference_targets)
+            )
             self.profile_store["profiles"].append(profile)
             self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
             reload_profiles(profile["id"])
@@ -1539,71 +1566,12 @@ class ChromatogramApp:
         return selected_row, selected_peak
 
     def _visual_peak_footprint_bounds(
-        self,
-        target_row,
-        x: np.ndarray,
-        y_smooth: np.ndarray,
+        self, target_row, x: np.ndarray, y_smooth: np.ndarray,
     ) -> tuple[float, float]:
-        """Extend only the painted footprint to the visible feet of a peak.
-
-        The calculation continues to use integration_start/end_x.  This helper
-        prevents a non-zero first sample from looking like a peak cut by a
-        vertical knife while keeping the validated numeric boundaries intact.
-        """
-        start_x = pd.to_numeric(pd.Series([target_row.get("integration_start_x")]), errors="coerce").iloc[0]
-        end_x = pd.to_numeric(pd.Series([target_row.get("integration_end_x")]), errors="coerce").iloc[0]
-        apex_x = pd.to_numeric(pd.Series([target_row.get("found_rt")]), errors="coerce").iloc[0]
-        if not np.all(np.isfinite([start_x, end_x, apex_x])) or end_x <= start_x:
-            return float(start_x), float(end_x)
-
-        start_idx = int(np.argmin(np.abs(x - float(start_x))))
-        end_idx = int(np.argmin(np.abs(x - float(end_x))))
-        apex_idx = int(np.argmin(np.abs(x - float(apex_x))))
-        if not (start_idx < apex_idx < end_idx):
-            return float(start_x), float(end_x)
-
-        ordered_rts = np.sort(pd.to_numeric(
-            self.matched_targets_df.get("found_rt", pd.Series(dtype=float)),
-            errors="coerce",
-        ).dropna().to_numpy(dtype=float))
-        previous = ordered_rts[ordered_rts < float(apex_x) - 1e-9]
-        following = ordered_rts[ordered_rts > float(apex_x) + 1e-9]
-        left_limit_x = float(apex_x) - 0.040
-        right_limit_x = float(apex_x) + 0.040
-        if previous.size and float(apex_x) - float(previous[-1]) <= 0.12:
-            left_limit_x = max(left_limit_x, 0.5 * (float(previous[-1]) + float(apex_x)))
-        if following.size and float(following[0]) - float(apex_x) <= 0.12:
-            right_limit_x = min(right_limit_x, 0.5 * (float(following[0]) + float(apex_x)))
-        left_limit_x = max(left_limit_x, float(start_x) - 0.024)
-        right_limit_x = min(right_limit_x, float(end_x) + 0.024)
-        left_limit_idx = max(0, int(np.searchsorted(x, left_limit_x, side="left")))
-        right_limit_idx = min(len(x) - 1, int(np.searchsorted(x, right_limit_x, side="right") - 1))
-
-        local_left = max(0, left_limit_idx - 8)
-        local_right = min(len(x), right_limit_idx + 9)
-        local_signal = np.asarray(y_smooth[local_left:local_right], dtype=float)
-        finite_local = local_signal[np.isfinite(local_signal)]
-        noise = float(np.median(np.abs(finite_local - np.median(finite_local))) * 1.4826) if finite_local.size else 0.0
-        apex_height = max(float(y_smooth[apex_idx]), 1.0)
-        visible_step = max(noise * 0.35, abs(apex_height) * 0.004, 1e-9)
-
-        visual_start_idx = start_idx
-        if left_limit_idx < start_idx:
-            segment = np.asarray(y_smooth[left_limit_idx:start_idx + 1], dtype=float)
-            if np.isfinite(segment).any():
-                candidate = left_limit_idx + int(np.nanargmin(segment))
-                if candidate < start_idx and float(y_smooth[start_idx] - y_smooth[candidate]) > visible_step:
-                    visual_start_idx = candidate
-
-        visual_end_idx = end_idx
-        if end_idx < right_limit_idx:
-            segment = np.asarray(y_smooth[end_idx:right_limit_idx + 1], dtype=float)
-            if np.isfinite(segment).any():
-                candidate = end_idx + int(np.nanargmin(segment))
-                if candidate > end_idx and float(y_smooth[end_idx] - y_smooth[candidate]) > visible_step:
-                    visual_end_idx = candidate
-
-        return float(x[visual_start_idx]), float(x[visual_end_idx])
+        """Paint only the interval actually used for numerical integration."""
+        start = pd.to_numeric(target_row.get("integration_start_x"), errors="coerce")
+        end = pd.to_numeric(target_row.get("integration_end_x"), errors="coerce")
+        return float(start), float(end)
 
     def _draw_chromatogram_axis(
         self,
