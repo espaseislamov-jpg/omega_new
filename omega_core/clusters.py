@@ -1930,20 +1930,38 @@ def refine_cluster_matches(
     peaks: pd.DataFrame,
     matched_targets: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    from .boundary_audit import snapshot, record_changes
+    history = []
+    previous = snapshot(matched_targets)
     peaks, matched_targets = refine_c18_c20_cluster_matches(processed, peaks, matched_targets)
+    previous = record_changes(previous, matched_targets, "refine_c18_c20_cluster_matches", history)
     matched_targets = refine_overlapped_c22_cluster_areas(processed, peaks, matched_targets)
+    previous = record_changes(previous, matched_targets, "refine_overlapped_c22_cluster_areas", history)
     matched_targets = refine_cluster_areas_by_local_valleys(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "refine_cluster_areas_by_local_valleys", history)
     matched_targets = recover_single_missing_c22_by_local_bounds(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "recover_single_missing_c22_by_local_bounds", history)
     matched_targets = fit_recovery.recover_missing_c22_components_with_fit(processed, peaks, matched_targets)
+    previous = record_changes(previous, matched_targets, "fit_recovery.recover_missing_c22_components_with_fit", history)
     before_c20_fit = matched_targets.copy()
     c20_fit = fit_recovery.recover_underintegrated_c20_components_with_fit(processed, peaks, matched_targets)
     matched_targets = _c20_identity_lock_after_fit(before_c20_fit, c20_fit, peaks)
+    previous = record_changes(previous, matched_targets, "_c20_identity_lock_after_fit", history)
     matched_targets = fit_recovery.recover_overlapped_c18_components_with_fit(processed, peaks, matched_targets)
+    previous = record_changes(previous, matched_targets, "fit_recovery.recover_overlapped_c18_components_with_fit", history)
     matched_targets = tighten_overwide_c22_cluster_tails(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "tighten_overwide_c22_cluster_tails", history)
     matched_targets = fit_recovery.refine_overwide_c22_cluster_with_pvfit(processed, peaks, matched_targets)
+    previous = record_changes(previous, matched_targets, "fit_recovery.refine_overwide_c22_cluster_with_pvfit", history)
     matched_targets = refine_small_peak_integrations(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "refine_small_peak_integrations", history)
     matched_targets = expand_final_peak_boundaries(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "expand_final_peak_boundaries", history)
     matched_targets = tighten_dpa_overintegration_by_local_bounds(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "tighten_dpa_overintegration_by_local_bounds", history)
     matched_targets = enforce_target_rt_corridors(processed, matched_targets)
+    previous = record_changes(previous, matched_targets, "enforce_target_rt_corridors", history)
     matched_targets = _apply_c20_display_identity(matched_targets)
+    previous = record_changes(previous, matched_targets, "_apply_c20_display_identity", history)
+    matched_targets.attrs["boundary_history"] = history
     return peaks, matched_targets

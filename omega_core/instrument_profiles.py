@@ -171,6 +171,14 @@ def validate_profile(profile: dict[str, Any], required_codes: Iterable[str]) -> 
     return out
 
 
+def copy_profile(profile: dict[str, Any], name: str) -> dict[str, Any]:
+    """Exact same-instrument copy; preserve processing and judge calibration."""
+    copied = deepcopy(profile)
+    copied["id"] = str(uuid.uuid4())
+    copied["name"] = name
+    return copied
+
+
 def default_store(reference_targets: pd.DataFrame) -> dict[str, Any]:
     profile = legacy_profile(reference_targets)
     return {
@@ -276,7 +284,6 @@ def import_profile(path: Path, store: dict[str, Any], reference_targets: pd.Data
     candidate = raw.get("profile") if isinstance(raw, dict) and "profile" in raw else raw
     profile = validate_profile(candidate, _ordered_codes(reference_targets))
     profile["id"] = str(uuid.uuid4())
-    profile["custom_rt"] = True
     profile["name"] = unique_profile_name(store, profile["name"])
     return profile
 
