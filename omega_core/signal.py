@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +75,8 @@ CHEMSTATION_INITIAL_THRESHOLD = 12.9
 _PYOPENMS_PEAK_PICKER = None
 _PYOPENMS_IMPORT_ATTEMPTED = False
 oms = None
+_PYOPENMS_LOCK = threading.Lock()
+_PYOPENMS_THREAD = threading.local()
 
 
 def _robust_sigma(values: np.ndarray) -> float:
@@ -162,25 +165,38 @@ def _merge_peak_records(peaks_df: pd.DataFrame, extra_records) -> pd.DataFrame:
         out = pd.DataFrame(base_records, columns=PEAK_RECORD_COLUMNS)
         return out.sort_values("apex_x").reset_index(drop=True)
 
-    # Supplemental detectors may add missing peaks, but must not silently
-    # replace an accepted primary peak just because their RT is slightly earlier.
-    deduped = list(base_records)
-    supplemental = []
+    # Restore the pre-regression selection of complete detector records.
+    # Keeping the primary unconditionally discarded the valley-based geometry.
+    # A duplicate without valid geometry must never displace a usable peak.
+    merged_records = list(base_records)
     for record in extra_records:
         item = {column: record.get(column, np.nan) for column in PEAK_RECORD_COLUMNS}
-        supplemental.append(item)
-    def strength(row):
-        value = float(row.get("prominence", 0.0))
-        return value if np.isfinite(value) else 0.0
-    supplemental.sort(key=lambda row: (-strength(row), float(row["apex_x"])))
-    for row in supplemental:
-        apex_x = float(row["apex_x"])
+        apex_x = float(item["apex_x"])
         if not np.isfinite(apex_x):
             continue
-        if any(abs(apex_x - float(existing["apex_x"])) <= 0.006 for existing in deduped):
+        duplicates = [base for base in base_records
+                      if abs(apex_x - float(base["apex_x"])) <= 0.006]
+        if duplicates:
+            start, end, area = (float(item[key]) for key in ("start_x", "end_x", "area"))
+            if not (np.isfinite([start, end, area]).all() and start < apex_x < end and area > 0):
+                continue
+            if not any(start < float(base["apex_x"]) < end for base in duplicates):
+                continue
+            if any(start <= float(base["apex_x"]) <= end
+                   for base in base_records
+                   if abs(apex_x - float(base["apex_x"])) > 0.006):
+                continue
+        merged_records.append(item)
+
+    merged_records.sort(key=lambda row: (float(row["apex_x"]), -float(row["area"])))
+    deduped = []
+    last_apex = None
+    for row in merged_records:
+        apex_x = float(row["apex_x"])
+        if last_apex is not None and abs(apex_x - last_apex) <= 0.006:
             continue
         deduped.append(row)
-    deduped.sort(key=lambda row: float(row["apex_x"]))
+        last_apex = apex_x
 
     if not deduped:
         return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
@@ -279,12 +295,12 @@ def augment_targeted_cluster_peaks(
 
 
 def _get_pyopenms_peak_picker():
-    global _PYOPENMS_PEAK_PICKER
-    if _PYOPENMS_PEAK_PICKER is not None:
-        return _PYOPENMS_PEAK_PICKER
+    cached = getattr(_PYOPENMS_THREAD, "picker", None)
+    if cached is not None:
+        return cached
     pyopenms = _load_pyopenms()
     if pyopenms is None:
-        return None
+        raise RuntimeError("PyOpenMS не загружен.")
     picker = pyopenms.PeakPickerChromatogram()
     params = picker.getParameters()
     params.setValue(b"gauss_width", float(PYOPENMS_GAUSS_WIDTH_SECONDS))
@@ -293,22 +309,22 @@ def _get_pyopenms_peak_picker():
     params.setValue(b"use_gauss", b"true")
     params.setValue(b"remove_overlapping_peaks", b"false")
     picker.setParameters(params)
-    _PYOPENMS_PEAK_PICKER = picker
+    _PYOPENMS_THREAD.picker = picker
     return picker
 
 
 def _load_pyopenms():
     global _PYOPENMS_IMPORT_ATTEMPTED, oms
-    if _PYOPENMS_IMPORT_ATTEMPTED:
-        return oms
-    _PYOPENMS_IMPORT_ATTEMPTED = True
-    try:
-        import pyopenms as loaded_oms
-    except Exception:
-        oms = None
-    else:
+    with _PYOPENMS_LOCK:
+        if oms is not None:
+            return oms
+        try:
+            import pyopenms as loaded_oms
+        except Exception as exc:
+            raise RuntimeError("PyOpenMS не загрузился. Расчёт остановлен: отключать детектор молча нельзя.") from exc
         oms = loaded_oms
-    return oms
+        _PYOPENMS_IMPORT_ATTEMPTED = True
+        return oms
 
 
 def detect_peaks_with_pyopenms(df: pd.DataFrame) -> pd.DataFrame:
@@ -316,7 +332,7 @@ def detect_peaks_with_pyopenms(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
     pyopenms = _load_pyopenms()
     if pyopenms is None:
-        return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
+        raise RuntimeError("PyOpenMS не загружен.")
 
     try:
         x_col = _get_x_column_name(df)
@@ -330,11 +346,11 @@ def detect_peaks_with_pyopenms(df: pd.DataFrame) -> pd.DataFrame:
         picked = pyopenms.MSChromatogram()
         picker = _get_pyopenms_peak_picker()
         if picker is None:
-            return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
+            raise RuntimeError("Детектор PyOpenMS не создан.")
         picker.pickChromatogram(chromatogram, picked)
         peak_rts, _ = picked.get_peaks()
-    except Exception:
-        return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
+    except Exception as exc:
+        raise RuntimeError("Ошибка детектора PyOpenMS. Пустой список пиков не является результатом расчёта.") from exc
 
     prominence_floor = max(
         PYOPENMS_MIN_PROMINENCE_FLOOR,
@@ -487,55 +503,15 @@ def add_smoothing_and_derivatives(
     polyorder: int = SAVGOL_POLYORDER,
     candidate_windows=None,
 ) -> tuple[pd.DataFrame, int]:
+    """Derivatives in physical time; smoothing is internal, never the display signal."""
+    from .peak_geometry import derivative_signal
     out = df.copy()
-    y = out["y_corrected"].to_numpy(dtype=float)
-    x = out["x_corrected"].to_numpy(dtype=float)
-    if candidate_windows is None:
-        candidate_windows = SAVGOL_CANDIDATE_WINDOWS
-
-    if y.size <= polyorder + 2:
-        raise ValueError("Not enough points for Savitzky-Golay smoothing.")
-
-    valid_windows = sorted({
-        int(w) for w in candidate_windows
-        if int(w) % 2 == 1 and int(w) > polyorder and int(w) <= (len(y) if len(y) % 2 == 1 else len(y) - 1)
-    })
-    if SAVGOL_MAX_SELECTED_WINDOW is not None:
-        capped_windows = [int(w) for w in valid_windows if int(w) <= int(SAVGOL_MAX_SELECTED_WINDOW)]
-        if capped_windows:
-            valid_windows = capped_windows
-    if not valid_windows:
-        fallback = len(y) if len(y) % 2 == 1 else len(y) - 1
-        fallback = max(polyorder + 2 + ((polyorder + 2) % 2 == 0), min(fallback, 11))
-        valid_windows = [fallback]
-
-    best_window = valid_windows[0]
-    best_score = math.inf
-    best_smooth = None
-    raw_scale = max(_robust_sigma(y), 1e-9)
-    y_p99 = float(np.percentile(y, 99))
-    y_p99_abs = max(abs(y_p99), 1e-9)
-
-    for window in valid_windows:
-        smooth = savgol_filter(y, window_length=window, polyorder=polyorder, mode="interp")
-        residual = y - smooth
-        noise_score = _robust_sigma(residual) / raw_scale
-        curvature_score = _robust_sigma(np.diff(smooth, n=2))
-        peak_loss = abs(np.percentile(smooth, 99) - y_p99) / y_p99_abs
-        score = noise_score + 0.15 * curvature_score + 2.0 * peak_loss
-        if score < best_score:
-            best_score = float(score)
-            best_window = int(window)
-            best_smooth = smooth
-
-    if best_smooth is None:
-        best_smooth = savgol_filter(y, window_length=best_window, polyorder=polyorder, mode="interp")
-
-    dy = np.gradient(best_smooth, x)
-    out["y_smooth"] = best_smooth
-    out["dy"] = dy
-    out["d2y"] = np.gradient(dy, x)
-    return out, best_window
+    x = out[_get_x_column_name(out)].to_numpy(dtype=float)
+    y = out['y_corrected'].to_numpy(dtype=float)
+    gx, _, smooth, dy, d2y, window = derivative_signal(x, y)
+    for name, values in (('y_smooth', smooth), ('dy', dy), ('d2y', d2y)):
+        out[name] = np.interp(x, gx, values)
+    return out, window
 
 
 def detect_peak_candidates(
@@ -546,110 +522,12 @@ def detect_peak_candidates(
     prominence_sigma: float = PEAK_DETECTION_PROMINENCE_SIGMA,
     rel_height: float = PEAK_INTEGRATION_REL_HEIGHT,
 ) -> pd.DataFrame:
+    """Detect geometry independently of target names and legacy integration widths."""
+    from .peak_geometry import detect_geometry
     if df is None or df.empty:
-        return pd.DataFrame(columns=["peak_id", "start_x", "apex_x", "end_x", "area", "percent_area"])
-
-    x_col = _get_x_column_name(df)
-    x = df[x_col].to_numpy(dtype=float)
-    y_corrected = df["y_corrected"].to_numpy(dtype=float)
-    y_smooth = df["y_smooth"].to_numpy(dtype=float)
-    y_smooth_positive = np.clip(y_smooth, 0.0, None)
-    dx = float(np.median(np.diff(x))) if len(x) > 1 else 1.0
-    noise = max(_robust_sigma(y_corrected), 1e-9)
-
-    height_floor = max(np.median(y_smooth) + height_sigma * noise, np.quantile(y_smooth, 0.60))
-    prominence_floor = max(
-        prominence_sigma * noise,
-        np.quantile(y_smooth_positive, 0.75) * 0.05,
-        CHEMSTATION_INITIAL_THRESHOLD,
-    )
-    min_distance = max(1, int(round(0.03 / max(dx, 1e-9))))
-    min_width = max(1, int(round(CHEMSTATION_INITIAL_PEAK_WIDTH / max(dx, 1e-9))))
-
-    peaks, props = find_peaks(
-        y_smooth,
-        height=height_floor,
-        prominence=prominence_floor,
-        distance=min_distance,
-        width=min_width,
-    )
-    if peaks.size == 0:
-        return _augment_detected_peaks(df, pd.DataFrame(columns=PEAK_RECORD_COLUMNS), reference_targets)
-
-    widths = peak_widths(y_smooth, peaks, rel_height=rel_height)
-    left_ips = widths[2]
-    right_ips = widths[3]
-
-    ordered_positions = np.argsort(peaks)
-    sorted_peaks = peaks[ordered_positions]
-    sorted_left_bases = np.asarray(props.get("left_bases", peaks), dtype=int)[ordered_positions]
-    sorted_right_bases = np.asarray(props.get("right_bases", peaks), dtype=int)[ordered_positions]
-    boundary_signal = np.clip(y_corrected, 0.0, None)
-    split_by_peak_idx: dict[int, tuple[int | None, int | None]] = {}
-    for sorted_pos, peak_idx in enumerate(sorted_peaks):
-        left_split = None
-        right_split = None
-        if sorted_pos > 0:
-            prev_peak = int(sorted_peaks[sorted_pos - 1])
-            if int(peak_idx) > prev_peak + 1:
-                valley_slice = slice(prev_peak, int(peak_idx) + 1)
-                left_split = int(np.argmin(boundary_signal[valley_slice]) + valley_slice.start)
-        if sorted_pos < len(sorted_peaks) - 1:
-            next_peak = int(sorted_peaks[sorted_pos + 1])
-            if next_peak > int(peak_idx) + 1:
-                valley_slice = slice(int(peak_idx), next_peak + 1)
-                right_split = int(np.argmin(boundary_signal[valley_slice]) + valley_slice.start)
-        split_by_peak_idx[int(peak_idx)] = (left_split, right_split)
-
-    records = []
-    for order, peak_idx in enumerate(peaks, start=1):
-        if PEAK_BOUNDARY_MODE == "prominence_bases":
-            start_idx = max(0, int(props.get("left_bases", peaks)[order - 1]))
-            end_idx = min(len(x) - 1, int(props.get("right_bases", peaks)[order - 1]))
-            left_split, right_split = split_by_peak_idx.get(int(peak_idx), (None, None))
-            if left_split is not None:
-                start_idx = max(start_idx, int(left_split))
-            if right_split is not None:
-                end_idx = min(end_idx, int(right_split))
-            max_half_width_points = max(3, int(round(0.5 * PEAK_PROMINENCE_BASE_MAX_WIDTH / max(dx, 1e-9))))
-            start_idx = max(start_idx, int(peak_idx) - max_half_width_points)
-            end_idx = min(end_idx, int(peak_idx) + max_half_width_points)
-        else:
-            start_idx = max(0, int(np.floor(left_ips[order - 1])))
-            end_idx = min(len(x) - 1, int(np.ceil(right_ips[order - 1])))
-        if end_idx <= start_idx:
-            continue
-        x_seg = x[start_idx:end_idx + 1]
-        y_seg = np.clip(y_corrected[start_idx:end_idx + 1], 0.0, None)
-        area = float(np.trapezoid(y_seg, x_seg))
-        if area < CHEMSTATION_INITIAL_AREA_REJECT:
-            continue
-        records.append({
-            "peak_id": order,
-            "start_idx": start_idx,
-            "apex_idx": int(peak_idx),
-            "end_idx": end_idx,
-            "start_x": float(x[start_idx]),
-            "apex_x": float(x[peak_idx]),
-            "end_x": float(x[end_idx]),
-            "height": float(props["peak_heights"][order - 1]),
-            "prominence": float(props["prominences"][order - 1]),
-            "width_points": float(props["widths"][order - 1]),
-            "area": area,
-        })
-
-    if not records:
-        return _augment_detected_peaks(df, pd.DataFrame(columns=PEAK_RECORD_COLUMNS), reference_targets)
-
-    peaks_df = pd.DataFrame(records).sort_values("apex_x").reset_index(drop=True)
-    if peaks_df.empty:
-        return pd.DataFrame(columns=["peak_id", "start_x", "apex_x", "end_x", "area", "percent_area"])
-
-    peaks_df["peak_id"] = np.arange(1, len(peaks_df) + 1)
-    total_area = float(peaks_df["area"].sum())
-    peaks_df["percent_area"] = 100.0 * peaks_df["area"] / total_area if total_area > 0 else np.nan
-
-    return _augment_detected_peaks(df, peaks_df, reference_targets)
+        return pd.DataFrame(columns=PEAK_RECORD_COLUMNS)
+    return detect_geometry(df[_get_x_column_name(df)].to_numpy(dtype=float),
+                           df['y_corrected'].to_numpy(dtype=float))
 
 
 def _augment_detected_peaks(df, peaks_df, reference_targets):

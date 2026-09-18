@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    {
+      "id": "5e6fb0b8-0513-4ccc-944f-aab9be75b9c0",
+      "name": "FID2 (119)",
+      "custom_rt": true,
+      "calculation_mode": "direct_components",
+      "omega_component_codes": [
+        "C20:3N8",
+        "C22:6",
+        "C22:4"
+      ],
+      "result_multiplier": 0.9489474463577745,
+      "retention_times": {
+        "C16:1N7": 7.054,
+        "C16:0": 7.165,
+        "C18:3N6": 7.964,
+        "C18:2N6C": 8.049,
+        "C18:1N9C": 8.08,
+        "C18:3N3": 8.109,
+        "C18:0": 8.205,
+        "C20:4N6": 8.849,
+        "C20:5": 8.88,
+        "C20:3N8": 8.935,
+        "C22:6": 9.723,
+        "C22:5": 9.754,
+        "C22:4": 9.785,
+        "C24:1N9": 10.773,
+        "C24:0": 10.862
+      },
+      "judge_calibrated": false,
+      "judge_emergency_enabled": true,
+      "judge_target_abs_error": 0.8,
+      "judge_manual_samples": 19,
+      "judge_error_samples": 0,
+      "judge_validation_batches": 2,
+      "judge_c22_height_priority_threshold": null,
+      "integration_baseline": "geometry"
+    },
+    {
+      "id": "c53b42c5-ec26-47e1-9481-ec6ea2f7d6c9",
+      "name": "FID1 (128)",
+      "custom_rt": false,
+      "calculation_mode": "direct_components",
+      "omega_component_codes": [
+        "C20:5",
+        "C22:6",
+        "C22:4"
+      ],
+      "result_multiplier": 1.0,
+      "judge_calibrated": true,
+      "judge_emergency_enabled": false,
+      "judge_target_abs_error": 0.5,
+      "judge_manual_samples": 411,
+      "judge_error_samples": 28,
+      "judge_validation_batches": 17,
+      "judge_c22_height_priority_threshold": 1.3635,
+      "retention_times": {
+        "C16:1N7": 6.5673,
+        "C16:0": 6.6813,
+        "C18:3N6": 7.472,
+        "C18:2N6C": 7.556,
+        "C18:1N9C": 7.589,
+        "C18:3N3": 7.6173,
+        "C18:0": 7.717,
+        "C20:4N6": 8.347,
+        "C20:5": 8.378,
+        "C20:3N8": 8.4343,
+        "C22:6": 9.2127,
+        "C22:5": 9.242,
+        "C22:4": 9.276,
+        "C24:1N9": 10.2643,
+        "C24:0": 10.3577
+      },
+      "integration_baseline": "chebyshev"
+    }
+  ]
+}

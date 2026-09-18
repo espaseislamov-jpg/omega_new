@@ -22,6 +22,8 @@ PROFILE_FILE_SUFFIX = ".omega-profile.json"
 LEGACY_CALCULATION_MODE = "legacy"
 DIRECT_COMPONENTS_CALCULATION_MODE = "direct_components"
 DEFAULT_OMEGA_COMPONENT_CODES = ("C20:5", "C22:6", "C22:5")
+WORKBOOK_118_COMPONENT_CODES = ("C20:5", "C22:6", "C22:4")
+AREA_BASELINE_MODES = frozenset({'geometry', 'chebyshev'})
 CALCULATION_MODES = frozenset({LEGACY_CALCULATION_MODE, DIRECT_COMPONENTS_CALCULATION_MODE})
 LEGACY_JUDGE_MANUAL_SAMPLES = 411
 LEGACY_JUDGE_ERROR_SAMPLES = 28
@@ -42,8 +44,9 @@ def legacy_profile(reference_targets: pd.DataFrame | None = None) -> dict[str, A
         "id": LEGACY_PROFILE_ID,
         "name": "118 прибор",
         "custom_rt": False,
-        "calculation_mode": LEGACY_CALCULATION_MODE,
-        "omega_component_codes": list(DEFAULT_OMEGA_COMPONENT_CODES),
+        "calculation_mode": DIRECT_COMPONENTS_CALCULATION_MODE,
+        "omega_component_codes": list(WORKBOOK_118_COMPONENT_CODES),
+        "integration_baseline": "chebyshev",
         "result_multiplier": 1.0,
         "judge_calibrated": True,
         "judge_emergency_enabled": False,
@@ -77,10 +80,32 @@ def new_profile(name: str, reference_targets: pd.DataFrame) -> dict[str, Any]:
     return profile
 
 
+def upgrade_legacy_profile(profile: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade the old 118/128 method, preserving custom direct profiles (119)."""
+    out = deepcopy(profile)
+    if not out.get('custom_rt', False) and out.get('calculation_mode', LEGACY_CALCULATION_MODE) == LEGACY_CALCULATION_MODE:
+        out.update(calculation_mode=DIRECT_COMPONENTS_CALCULATION_MODE,
+                   omega_component_codes=list(WORKBOOK_118_COMPONENT_CODES),
+                   integration_baseline='chebyshev')
+    # Restore the historical judge reset by G3, preserving RTs and direct areas.
+    if (not out.get('custom_rt', True)
+            and not out.get('judge_calibrated', False)
+            and not out.get('judge_emergency_enabled', False)
+            and all(out.get(key, 0) == 0 for key in
+                    ('judge_manual_samples', 'judge_error_samples', 'judge_validation_batches'))
+            and out.get('judge_c22_height_priority_threshold') is None):
+        out.update(judge_calibrated=True, judge_target_abs_error=0.5,
+                   judge_manual_samples=LEGACY_JUDGE_MANUAL_SAMPLES,
+                   judge_error_samples=LEGACY_JUDGE_ERROR_SAMPLES,
+                   judge_validation_batches=LEGACY_JUDGE_VALIDATION_BATCHES,
+                   judge_c22_height_priority_threshold=LEGACY_C22_HEIGHT_PRIORITY_THRESHOLD)
+    return out
+
+
 def validate_profile(profile: dict[str, Any], required_codes: Iterable[str]) -> dict[str, Any]:
     if not isinstance(profile, dict):
         raise ValueError("Профиль должен быть объектом JSON.")
-    out = deepcopy(profile)
+    out = upgrade_legacy_profile(profile)
     name = str(out.get("name", "")).strip()
     if not name:
         raise ValueError("Укажите название профиля.")
@@ -91,6 +116,9 @@ def validate_profile(profile: dict[str, Any], required_codes: Iterable[str]) -> 
     calculation_mode = str(out.get("calculation_mode", LEGACY_CALCULATION_MODE)).strip()
     if calculation_mode not in CALCULATION_MODES:
         raise ValueError("Неизвестная схема расчёта Omega-3.")
+    integration_baseline = str(out.get('integration_baseline', 'geometry'))
+    if integration_baseline not in AREA_BASELINE_MODES:
+        raise ValueError('Неизвестная базовая линия интегрирования.')
 
     custom_rt = bool(out.get("custom_rt", True))
     judge_calibrated = bool(out.get("judge_calibrated", not custom_rt))
@@ -157,6 +185,7 @@ def validate_profile(profile: dict[str, Any], required_codes: Iterable[str]) -> 
         "name": name,
         "custom_rt": custom_rt,
         "calculation_mode": calculation_mode,
+        "integration_baseline": integration_baseline,
         "omega_component_codes": omega_component_codes,
         "result_multiplier": multiplier,
         "judge_calibrated": judge_calibrated,
@@ -181,11 +210,20 @@ def copy_profile(profile: dict[str, Any], name: str) -> dict[str, Any]:
 
 def default_store(reference_targets: pd.DataFrame) -> dict[str, Any]:
     profile = legacy_profile(reference_targets)
+    builtins = builtin_profiles(reference_targets)
     return {
         "schema_version": SCHEMA_VERSION,
-        "active_profile_id": profile["id"],
-        "profiles": [profile],
+        "active_profile_id": builtins[-1]["id"],
+        "profiles": [profile, *builtins],
     }
+
+
+def builtin_profiles(reference_targets: pd.DataFrame) -> list[dict[str, Any]]:
+    """Release presets, independent of the user's editable profile store."""
+    path = io.get_runtime_resource_dir() / 'omega_default_profiles.json'
+    raw = json.loads(path.read_text(encoding='utf-8'))
+    codes = _ordered_codes(reference_targets)
+    return [validate_profile(profile, codes) for profile in raw['profiles']]
 
 
 def store_path() -> Path:
@@ -211,6 +249,8 @@ def _atomic_json_write(path: Path, payload: Any) -> None:
 
 def normalize_store(raw: Any, reference_targets: pd.DataFrame) -> dict[str, Any]:
     codes = _ordered_codes(reference_targets)
+    builtins = builtin_profiles(reference_targets)
+    builtin_names = {p['id']: p['name'] for p in builtins}
     legacy = legacy_profile(reference_targets)
     profiles: list[dict[str, Any]] = [legacy]
     seen = {LEGACY_PROFILE_ID}
@@ -222,11 +262,19 @@ def normalize_store(raw: Any, reference_targets: pd.DataFrame) -> dict[str, Any]
                 profile = validate_profile(item, codes)
             except (ValueError, TypeError):
                 continue
+            # Rename only the original presets; keep all edited parameters and
+            # independently named/custom profiles intact during an upgrade.
+            if profile['id'] in builtin_names and profile['name'] in ('119 прибор', '119', '128-1'):
+                profile['name'] = builtin_names[profile['id']]
             if profile["id"] in seen:
                 profile["id"] = str(uuid.uuid4())
             profiles.append(profile)
             seen.add(profile["id"])
-    active_id = str(raw.get("active_profile_id", LEGACY_PROFILE_ID)) if isinstance(raw, dict) else LEGACY_PROFILE_ID
+    for profile in builtins:
+        if profile['id'] not in seen:
+            profiles.append(profile)
+            seen.add(profile['id'])
+    active_id = str(raw.get("active_profile_id", builtins[-1]['id'])) if isinstance(raw, dict) else builtins[-1]['id']
     if active_id not in seen:
         active_id = LEGACY_PROFILE_ID
     return {"schema_version": SCHEMA_VERSION, "active_profile_id": active_id, "profiles": profiles}
@@ -289,6 +337,7 @@ def import_profile(path: Path, store: dict[str, Any], reference_targets: pd.Data
 
 
 def apply_profile_to_targets(reference_targets: pd.DataFrame, profile: dict[str, Any]) -> pd.DataFrame:
+    profile = upgrade_legacy_profile(profile)
     out = reference_targets.copy()
     custom_rt = bool(profile.get("custom_rt", False))
     if custom_rt:
@@ -298,6 +347,7 @@ def apply_profile_to_targets(reference_targets: pd.DataFrame, profile: dict[str,
     out["instrument_profile_id"] = str(profile.get("id", LEGACY_PROFILE_ID))
     out["instrument_profile_name"] = str(profile.get("name", ""))
     out["instrument_profile_custom_rt"] = custom_rt
+    out['instrument_profile_integration_baseline'] = str(profile.get('integration_baseline', 'geometry'))
     out["instrument_profile_calculation_mode"] = str(
         profile.get("calculation_mode", LEGACY_CALCULATION_MODE)
     )
@@ -323,7 +373,7 @@ def apply_profile_to_targets(reference_targets: pd.DataFrame, profile: dict[str,
 
 
 def profile_from_targets(reference_targets: pd.DataFrame) -> dict[str, Any]:
-    if reference_targets is None or reference_targets.empty:
+    if reference_targets is None or reference_targets.empty or not any(str(c).startswith('instrument_profile_') for c in reference_targets.columns):
         return legacy_profile(reference_targets)
     row = reference_targets.iloc[0]
     component_codes = (
@@ -338,6 +388,11 @@ def profile_from_targets(reference_targets: pd.DataFrame) -> dict[str, Any]:
         "id": str(row.get("instrument_profile_id", LEGACY_PROFILE_ID)),
         "name": str(row.get("instrument_profile_name", "118 прибор")),
         "custom_rt": bool(row.get("instrument_profile_custom_rt", False)),
+        "retention_times": {
+            str(code): float(rt)
+            for code, rt in zip(reference_targets['code'], reference_targets['expected_rt'])
+        },
+        "integration_baseline": str(row.get('instrument_profile_integration_baseline', 'geometry')),
         "calculation_mode": str(
             row.get("instrument_profile_calculation_mode", LEGACY_CALCULATION_MODE)
         ),
@@ -378,6 +433,10 @@ def judge_calibration_label(profile: dict[str, Any]) -> str:
         return f"Экстренный ±{threshold:.1f}{suffix}"
     if not bool(profile.get("judge_calibrated", False)):
         return "Не настроен"
+    if (not profile.get('custom_rt', True)
+            and profile.get('judge_manual_samples') == LEGACY_JUDGE_MANUAL_SAMPLES
+            and profile.get('judge_c22_height_priority_threshold') == LEGACY_C22_HEIGHT_PRIORITY_THRESHOLD):
+        return "Настроен (старые правила)"
     samples = max(0, int(profile.get("judge_manual_samples", 0)))
     errors = max(0, int(profile.get("judge_error_samples", 0)))
     if samples:

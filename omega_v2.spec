@@ -1,5 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata, collect_data_files
+from pathlib import Path
+import hashlib
+import json
+import runpy
+
+release = runpy.run_path('omega_version.py')
+
+digest = hashlib.sha256()
+for path in sorted(Path("omega_core").glob("*.py")):
+    digest.update(path.name.encode())
+    digest.update(path.read_text(encoding="utf-8").encode())
+manifest = Path("build/runtime_manifest.json")
+manifest.parent.mkdir(exist_ok=True)
+manifest.write_text(json.dumps({"engine_sha256": digest.hexdigest()}), encoding="utf-8")
+runtime_data = [(str(manifest), "."), ("requirements.txt", ".")]
+for package in ("numpy", "pandas", "scipy", "pybaselines", "lmfit", "pyopenms"):
+    runtime_data += copy_metadata(package)
+runtime_data += collect_data_files("pyopenms")
 
 hiddenimports = [
     "New_idea",
@@ -12,7 +30,6 @@ hiddenimports = [
     "openpyxl",
     "pybaselines",
     "lmfit",
-    "chromatopy",
     "pyopenms",
 ]
 hiddenimports += collect_submodules("omega_core")
@@ -41,7 +58,8 @@ a = Analysis(
     datas=[
         ("reference_targets_reverted_c22fixed.json", "."),
         ("chebyshev_coefficients.csv", "."),
-    ],
+        ("omega_default_profiles.json", "."),
+    ] + runtime_data,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -52,14 +70,16 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name="omega_v2",
+    name="Omega",
+    version="installer/version_info.txt",
+    contents_directory=release['RUNTIME_DIR'],
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -74,10 +94,9 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="omega_v2",
+    name="Omega_V3.0",
 )

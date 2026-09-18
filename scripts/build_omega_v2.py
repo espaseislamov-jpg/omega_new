@@ -8,7 +8,7 @@ from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 SPEC_PATH = PROJECT_DIR / "omega_v2.spec"
-REQUIREMENT_FILES = [PROJECT_DIR / "requirements.txt", PROJECT_DIR / "requirements-chromatopy.txt"]
+REQUIREMENT_FILES = [PROJECT_DIR / "requirements.txt"]
 
 
 def run(command: list[str]) -> None:
@@ -34,8 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         run([sys.executable, "-m", "pip", "install", "pyinstaller>=6,<7"])
     run([sys.executable, "-m", "PyInstaller", "--clean", "--noconfirm", str(SPEC_PATH)])
     print("\nBuild finished.")
-    print("Windows: dist/omega_v2/omega_v2.exe")
-    print("Linux/macOS: dist/omega_v2/omega_v2")
+    print("Windows: dist/Omega_V3.0/Omega.exe")
+    print("Linux/macOS: dist/Omega_V3.0/Omega")
     return 0
 
 

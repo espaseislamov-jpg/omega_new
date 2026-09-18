@@ -257,6 +257,15 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
         value = row["status"].iloc[0]
         return "" if pd.isna(value) else str(value)
 
+    manual_codes = {str(row["code"]) for row in valid.to_dict("records")
+                    if "manual" in str(row.get("status", ""))}
+    measured_codes = {str(row['code']) for row in valid.to_dict('records')
+                      if row.get('geometry_method') == 'derivative_valley_v1'}
+    correction_exempt_codes = manual_codes | measured_codes
+    manual_c18 = bool(correction_exempt_codes & {"C18:1N9C", "C18:2N6C", "C18:3N3"})
+    manual_c20 = bool(correction_exempt_codes & {"C20:4N6", "C20:5", "C20:3N8"})
+    manual_c22 = bool(correction_exempt_codes & {"C22:6", "C22:5", "C22:4"})
+
     calculation_mode = "legacy"
     if "instrument_profile_calculation_mode" in valid:
         calculation_mode = str(valid["instrument_profile_calculation_mode"].iloc[0])
@@ -303,7 +312,8 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
     c18_denominator_scale = 1.0
     effective_total_area = total_area
     if (
-        c18_1 > 0
+        not manual_c18
+        and c18_1 > 0
         and c18_2 > 0
         and c18_1 > c18_2 * C18_DENOMINATOR_DOMINANCE_RATIO
         and c18_3 < c18_1 * C18_DENOMINATOR_SMALL_N3_FRACTION
@@ -406,6 +416,11 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
             epa_overlap_fraction = 0.0
             epa_model_applied = False
             epa_extra_scale = 1.0
+
+    if manual_c20:
+        epa_credit_area = epa_overlap_fraction = 0.0
+        epa_model_applied = False
+        epa_extra_scale = 1.0
 
     c22_ratio = dpa / c22_4 if c22_4 > 0 else np.nan
     c22_width_values = np.asarray([width_of("C22:6"), width_of("C22:5"), width_of("C22:4")], dtype=float)
@@ -523,6 +538,17 @@ def compute_omega(matched_targets: pd.DataFrame) -> dict:
             c22_width_balance_points = C22_WIDTH_BALANCE_NEGATIVE_POINTS
     c22_width_balance_applied = abs(c22_width_balance_points) > 1e-12
 
+    if manual_c22:
+        c22_credit_area = c22_fraction = c22_debit_area = c22_debit_points = 0.0
+        c22_width_balance_points = 0.0
+        model_applied = c22_debit_applied = c22_width_balance_applied = False
+        c22_missing_dha_coelution = False
+        legacy_fraction = model_fraction = 0.0
+        c22_width_scale = 1.0
+
+    result['measured_geometry_codes'] = sorted(measured_codes)
+    result["manual_correction_groups"] = [group for group in ('C18', 'C20', 'C22')
+                                           if any(code.startswith(group+':') for code in manual_codes)]
     corrected_value = (
         100.0 * (epa + dha + dpa + epa_credit_area + c22_credit_area - c22_debit_area) / effective_total_area
         + c22_width_balance_points
@@ -769,6 +795,31 @@ def classify_high_error_risk(features: Mapping[str, object]) -> dict:
     }
 
 
+def legacy_judge_c22_fraction(matched_targets: pd.DataFrame) -> float:
+    """Historical judge input only; never add its overlap credit to G3 areas."""
+    valid = matched_targets[pd.notna(matched_targets['area'])]
+    c22 = valid[valid['code'].isin(['C22:6', 'C22:5', 'C22:4'])]
+    # New geometry bypasses empirical *area* corrections, but must not erase
+    # the historical judge's shape/area diagnostic. Keep manual-edit exemption.
+    if any('manual' in str(row.get('status', '')) for row in c22.to_dict('records')):
+        return 0.0
+    total = float(valid['area'].sum())
+    if not np.isfinite(total) or total <= 0:
+        return 0.0
+    def area(code):
+        rows = valid.loc[valid['code'] == code, 'area']
+        return float(rows.iloc[0]) if len(rows) else 0.0
+    denominator = area('C22:4')
+    strict = 100.0 * (area('C20:5') + area('C22:6') + area('C22:5')) / total
+    if denominator <= 0 or strict < C22_OVERLAP_TRIGGER_OMEGA_MIN:
+        return 0.0
+    ratio = area('C22:5') / denominator
+    if not np.isfinite(ratio):
+        return 0.0
+    return float(np.clip(C22_OVERLAP_RATIO_OFFSET - C22_OVERLAP_RATIO_SLOPE * ratio,
+                         0.0, C22_OVERLAP_FRACTION_CAP))
+
+
 def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, object]) -> dict:
     """Build production features and run the high-recall integration judge."""
     if matched_targets is None or matched_targets.empty:
@@ -931,6 +982,11 @@ def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, ob
             local_shift = pd.to_numeric(c20_row.get("rt_local_shift"), errors="coerce").iloc[0]
             if np.isfinite(expected_rt) and np.isfinite(local_shift):
                 c20_judge_target_rt = float(expected_rt + local_shift)
+    legacy_fraction = omega.get('c22_overlap_legacy_fraction', np.nan)
+    if (not custom_profile and judge_calibrated
+            and 'instrument_profile_calculation_mode' in valid
+            and str(valid['instrument_profile_calculation_mode'].iloc[0]) == 'direct_components'):
+        legacy_fraction = legacy_judge_c22_fraction(valid)
     features = {
         "missing_key_peaks": missing_key_peaks,
         "duplicate_peak_codes": duplicate_codes,
@@ -942,7 +998,7 @@ def assess_high_error_risk(matched_targets: pd.DataFrame, omega: Mapping[str, ob
         "emergency_geometry_reasons": emergency_reasons,
         "C22_height_ratio": c22_height_ratio,
         "C22_height_priority_threshold": height_threshold,
-        "omega_c22_overlap_legacy_fraction": omega.get("c22_overlap_legacy_fraction", np.nan),
+        "omega_c22_overlap_legacy_fraction": legacy_fraction,
         "C22_5_found_rt": target_value("C22:5", "found_rt"),
         "C20_3N8_corrected_target_rt": c20_judge_target_rt,
         "C20_5_found_rt": target_value("C20:5", "found_rt"),
@@ -1025,7 +1081,7 @@ def assess_confidence(
     strict_value = float(omega.get("omega3_trio_strict", np.nan))
     spread = abs(omega_value - strict_value) if np.isfinite(omega_value) and np.isfinite(strict_value) else np.nan
 
-    if baseline_mode != "chebyshev":
+    if baseline_mode not in {"chebyshev", "chebyshev_fixed_g2_geometry"}:
         penalize(4.0, "Фон сигнала оказался сложным — проверьте границы пиков")
 
     if cluster_quality_score is not None and np.isfinite(cluster_quality_score) and cluster_quality_score < CLUSTER_QUALITY_COMPLETE_SCORE:
@@ -1194,8 +1250,15 @@ def assess_confidence(
 
 
 def annotate_result(result: dict, baseline_mode: str) -> dict:
+    from .peak_evidence import assess_geometry_evidence, uses_configured_base_judge
     annotated = dict(result)
     annotated["baseline_mode"] = baseline_mode
+    frame = annotated['matched_targets_df']
+    if ('geometry_method' in frame and frame.geometry_method.eq('derivative_valley_v1').any()
+            and not uses_configured_base_judge(frame)):
+        annotated['confidence'] = assess_geometry_evidence(frame)
+        annotated['cluster_quality_score'] = annotated['confidence']['geometry_score']
+        return annotated
     annotated["cluster_quality_score"] = compute_cluster_quality(annotated["matched_targets_df"])
     annotated["confidence"] = assess_confidence(
         matched_targets=annotated["matched_targets_df"],
@@ -1205,3 +1268,70 @@ def annotate_result(result: dict, baseline_mode: str) -> dict:
         cluster_quality_score=annotated["cluster_quality_score"],
     )
     return annotated
+
+
+def apply_reporting_gate(result: dict) -> dict:
+    """Keep internal estimates for diagnosis; do not publish missing-peak numbers."""
+    from copy import deepcopy
+    from .peak_evidence import CORE_DENOMINATOR_CODES, measurement_states
+    out = dict(result)
+    frame = out.get("matched_targets_df", pd.DataFrame())
+    required = ["C20:5", "C22:6", "C22:5"]
+    if "instrument_profile_omega_component" in frame:
+        required = frame.loc[frame["instrument_profile_omega_component"].fillna(False).astype(bool), "code"].astype(str).tolist()
+    components_configured = bool(required)
+    if "code" in frame:
+        required += [code for code in CORE_DENOMINATOR_CODES if code in set(frame.code) and code not in required]
+        # Every positive area contributes to the denominator, even outside Omega.
+        states = measurement_states(frame)
+        required += [str(code) for code in frame.loc[states.isin(["invalid", "unresolved"]), "code"] if code not in required]
+    reasons, affected = [], []
+    if not components_configured:
+        reasons.append("Не заданы компоненты Omega")
+    identities = {}
+    estimated = []
+    for code in required:
+        row = frame[frame["code"] == code] if "code" in frame else pd.DataFrame()
+        if len(row) != 1:
+            reasons.append(f"{code}: пик отсутствует или назначен неоднозначно")
+            affected.append(code)
+            continue
+        record = row.iloc[0]
+        status = str(record.get("status", ""))
+        numbers = pd.to_numeric(pd.Series([record.get(key, np.nan) for key in
+                                           ("area", "found_rt", "integration_start_x", "integration_end_x")]), errors="coerce").to_numpy()
+        area, apex, start, end = numbers
+        manual = "manual" in status
+        if (not np.isfinite(numbers).all() or area <= 0 or not start < apex < end
+                or (("not_found" in status or "unresolved" in status or "estimated" in status) and not manual)):
+            reasons.append(f"{code}: нет подтверждённого пика внутри границ")
+            affected.append(code)
+        peak_id = record.get("matched_peak_id", np.nan)
+        if "fit" in status and not manual:
+            estimated.append(code)
+        elif pd.notna(peak_id) and not manual:
+            if peak_id in identities:
+                reasons.append(f"{code} и {identities[peak_id]}: одна вершина назначена двум компонентам")
+                affected.extend([code, identities[peak_id]])
+            identities[peak_id] = code
+    value = out.get("omega_report", np.nan)
+    if not np.isfinite(value):
+        reasons.append("Не удалось получить конечный результат Omega")
+    out["reportable"] = not reasons
+    out["report_status"] = "incomplete" if reasons else "model_estimate" if estimated else "complete"
+    out["report_reasons"] = reasons
+    out["estimated_components"] = estimated
+    if reasons:
+        out["omega_estimate"] = value
+        out["omega_report"] = np.nan
+        out["omega_report_unscaled"] = np.nan
+        confidence = deepcopy(out.get("confidence", {}))
+        confidence["score"] = 0.0
+        confidence["button_text"] = "СТОП — результат не подтверждён"
+        confidence["reasons"] = reasons + list(confidence.get("reasons", []))
+        risk = confidence.setdefault("high_error_risk", {})
+        risk["score"] = 100
+        risk["peak_codes"] = sorted(set(affected) | set(risk.get("peak_codes", [])))
+        risk["reason_codes"] = sorted(set(risk.get("reason_codes", [])) | {"unreportable_result"})
+        out["confidence"] = confidence
+    return out

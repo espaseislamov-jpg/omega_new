@@ -2,7 +2,10 @@
 
 import json
 import re
-import uuid
+import logging
+import sys
+from concurrent.futures import Future
+from threading import Thread
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
@@ -12,34 +15,26 @@ configure_windows_path_compat()
 import numpy as np
 import pandas as pd
 import tkinter as tk
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import matplotlib
 matplotlib.use("TkAgg")
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
 
 import omega_core
 from omega_core import metrics as core_metrics
 from omega_core import instrument_profiles
-from omega_core import rt_profile
+from omega_core import rt_profile, manual_edits, runtime
+from omega_core.results import finalize_result
 from omega_core.io import ensure_runtime_file
-
-
-def _get_x_column_name(df: pd.DataFrame) -> str:
-    if "x_corrected" in df.columns:
-        return "x_corrected"
-    if "x" in df.columns:
-        return "x"
-    raise KeyError("Expected an x or x_corrected column")
-
-
-def _recompute_matched_percent_area(matched_targets_df: pd.DataFrame) -> pd.DataFrame:
-    out = matched_targets_df.copy()
-    areas = pd.to_numeric(out["area"], errors="coerce")
-    total_area = float(areas.fillna(0.0).sum())
-    out["percent_area"] = 100.0 * areas / total_area if total_area > 0 else np.nan
-    return out
+from omega_ui import WorkspaceUI, readable_status
+from omega_version import APP_NAME
+from omega_workflow import WorkflowUI
+from omega_profiles_ui import ProfileManagerUI
+from omega_manual_ui import ManualIntegrationUI
+from omega_plot_ui import ChromatogramPlotUI
+# Retain the historical helper import for external diagnostic tools.
+from omega_plot_ui import _get_x_column_name as _get_x_column_name
 
 
 def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.DataFrame) -> dict:
@@ -53,10 +48,17 @@ def process_chromatogram_batch(dataframe: pd.DataFrame, reference_targets: pd.Da
     return result
 
 
-class ChromatogramApp:
+class ChromatogramToolbar(NavigationToolbar2Tk):
+    """Keep viewing/export tools; subplot layout is an implementation detail."""
+    toolitems = tuple(item for item in NavigationToolbar2Tk.toolitems
+                      if item[3] != "configure_subplots")
+
+
+class ChromatogramApp(WorkflowUI, WorkspaceUI, ProfileManagerUI, ManualIntegrationUI, ChromatogramPlotUI):
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Omega v2.7 — Chromatogram Peak Detector")
+        self.root.report_callback_exception = self.report_callback_exception
+        self.root.title(f"{APP_NAME} — анализ хроматограмм")
         screen_width = max(int(self.root.winfo_screenwidth()), 800)
         screen_height = max(int(self.root.winfo_screenheight()), 600)
         self.screen_width = screen_width
@@ -91,6 +93,7 @@ class ChromatogramApp:
         self._batch_tree_syncing = False
         self._preload_batch_index = 0
         self._preload_after_id = None
+        self._background_future = None
         self.batch_progress_window = None
         self.batch_progress_label_var = tk.StringVar(value="")
         self.batch_progress_detail_var = tk.StringVar(value="")
@@ -107,14 +110,16 @@ class ChromatogramApp:
         self._manual_drag_pending_bounds = None
         self._manual_drag_after_id = None
         self._manual_drag_axis = None
+        self._manual_pick = None
+        self._manual_pick_artist = None
         self._manual_overlay_artists = {}
 
         self.status_var = tk.StringVar(value="Выбери CSV-файл.")
         self.file_var = tk.StringVar(value="Файл не выбран")
-        self.omega_var = tk.StringVar(value="Omega-3: —")
+        self.omega_var = tk.StringVar(value="—")
         self.integration_var = tk.StringVar(value="Integration: —")
         self.gamma_var = tk.StringVar(value="γ-Linolenic: —")
-        self.batch_var = tk.StringVar(value="Series: —")
+        self.batch_var = tk.StringVar(value="Проба: —")
         self.confidence_var = tk.StringVar(value="Качество пиков: —")
         self.current_confidence = None
         self.profile_var = tk.StringVar(value=self.active_instrument_profile["name"])
@@ -122,187 +127,10 @@ class ChromatogramApp:
         self.profile_window = None
 
         self._build_ui()
+        self.setup_workflow()
 
     def _build_ui(self):
-        controls = ttk.Frame(self.root, padding=(10, 8))
-        controls.pack(fill="x")
-        action_bar = ttk.Frame(controls)
-        action_bar.pack(fill="x")
-        self.confidence_button = ttk.Button(
-            action_bar,
-            textvariable=self.confidence_var,
-            command=self.show_confidence_details,
-            width=36,
-        )
-        self.confidence_button.pack(side="right")
-        self.confidence_button.state(["disabled"])
-        ttk.Button(action_bar, text="Открыть CSV", command=self.open_file).pack(side="left", padx=(0, 10))
-        ttk.Button(action_bar, text="История границ", command=self.export_boundary_history).pack(side="left", padx=(0, 10))
-        self.prev_button = ttk.Button(action_bar, text="←", width=4, command=self.prev_batch)
-        self.prev_button.pack(side="left", padx=(0, 4))
-        self.next_button = ttk.Button(action_bar, text="→", width=4, command=self.next_batch)
-        self.next_button.pack(side="left", padx=(0, 10))
-        self.batch_results_button = ttk.Button(action_bar, text="Результаты Batch", command=self.open_batch_results_window)
-        self.batch_results_button.pack(side="left", padx=(0, 10))
-        ttk.Label(action_bar, textvariable=self.batch_var).pack(side="left", padx=(0, 14))
-
-        profile_bar = ttk.Frame(controls)
-        profile_bar.pack(fill="x", pady=(6, 0))
-        ttk.Label(profile_bar, text="Профиль прибора:").pack(side="left", padx=(0, 6))
-        self.profile_combo = ttk.Combobox(profile_bar, textvariable=self.profile_var, state="readonly", width=30)
-        self.profile_combo.pack(side="left", padx=(0, 10))
-        self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_combo_selected)
-        ttk.Button(profile_bar, text="Настроить профили…", command=self.open_profile_manager).pack(side="left")
-        self._refresh_profile_combo()
-
-        info_bar = ttk.Frame(controls)
-        info_bar.pack(fill="x", pady=(6, 0))
-        ttk.Label(info_bar, textvariable=self.file_var).pack(side="left", padx=(0, 20))
-        ttk.Label(info_bar, textvariable=self.omega_var).pack(side="left")
-        ttk.Label(info_bar, textvariable=self.integration_var).pack(side="left", padx=(20, 0))
-        ttk.Label(info_bar, textvariable=self.gamma_var).pack(side="left", padx=(20, 0))
-
-        content = ttk.Frame(self.root, padding=(10, 0, 10, 0))
-        content.pack(fill="both", expand=True)
-
-        self.main_pane = ttk.Panedwindow(content, orient="horizontal")
-        self.main_pane.pack(fill="both", expand=True)
-        plot_frame = ttk.Frame(self.main_pane)
-        sidebar = ttk.Frame(self.main_pane, padding=(10, 0, 0, 0))
-        self.main_pane.add(plot_frame, weight=4)
-        self.main_pane.add(sidebar, weight=1)
-
-        # FigureCanvasTkAgg propagates the Figure's requested pixel size to Tk.
-        # A fixed 1200x800 canvas made the whole UI wider than smaller screens.
-        # These are only Tk's requested dimensions; the packed canvas expands
-        # with the window.  Keep the request deliberately compact so panes can
-        # also shrink cleanly on laptops and scaled Windows desktops.
-        figure_width_px = max(650, int(self.initial_window_width * (0.52 if self.compact_ui else 0.62)))
-        figure_height_px = max(460, int(self.initial_window_height - (240 if self.compact_ui else 180)))
-        self.figure = Figure(figsize=(figure_width_px / 100.0, figure_height_px / 100.0), dpi=100)
-        self.figure.subplots_adjust(left=0.055, right=0.985, top=0.955, bottom=0.065)
-        grid = self.figure.add_gridspec(3, 2, height_ratios=[2.5, 1.0, 1.0], hspace=0.26, wspace=0.18)
-        self.ax = self.figure.add_subplot(grid[0, :])
-        self.preview_axes = []
-        self.preview_specs = rt_profile.preview_windows(self.reference_targets)
-        for index, spec in enumerate(self.preview_specs):
-            row = 1 + index // 2
-            col = index % 2
-            preview_ax = self.figure.add_subplot(grid[row, col])
-            self.preview_axes.append(preview_ax)
-
-        self.canvas = FigureCanvasTkAgg(self.figure, master=plot_frame)
-        self.canvas.mpl_connect("button_press_event", self.handle_manual_boundary_press)
-        self.canvas.mpl_connect("motion_notify_event", self.handle_manual_boundary_motion)
-        self.canvas.mpl_connect("button_release_event", self.handle_manual_boundary_release)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-        toolbar_host = tk.Frame(plot_frame)
-        toolbar_host.pack(fill="x")
-        toolbar = NavigationToolbar2Tk(self.canvas, toolbar_host, pack_toolbar=False)
-        toolbar.update()
-        toolbar.pack(side="left", fill="x")
-
-        self.sidebar_pane = ttk.Panedwindow(sidebar, orient="vertical")
-        self.sidebar_pane.pack(fill="both", expand=True)
-        batch_frame = ttk.LabelFrame(self.sidebar_pane, text="Batch", padding=(8, 8))
-        self.sidebar_pane.add(batch_frame, weight=1)
-        batch_columns = ("sample_name", "omega_value", "confidence")
-        batch_tree_frame = ttk.Frame(batch_frame)
-        batch_tree_frame.pack(fill="both", expand=True)
-        self.batch_tree = ttk.Treeview(
-            batch_tree_frame,
-            columns=batch_columns,
-            show="headings",
-            height=8 if self.compact_ui else 14,
-            selectmode="browse",
-        )
-        self.batch_tree.heading("sample_name", text="Образец")
-        self.batch_tree.heading("omega_value", text="Omega-3")
-        self.batch_tree.heading("confidence", text="Решение")
-        batch_widths = (190, 70, 165) if self.compact_ui else (230, 80, 205)
-        self.batch_tree.column("sample_name", width=batch_widths[0], minwidth=110, anchor="w", stretch=True)
-        self.batch_tree.column("omega_value", width=batch_widths[1], minwidth=60, anchor="center", stretch=False)
-        self.batch_tree.column("confidence", width=batch_widths[2], minwidth=125, anchor="w", stretch=True)
-        self.batch_tree.pack(side="left", fill="both", expand=True)
-        batch_scroll = ttk.Scrollbar(batch_tree_frame, orient="vertical", command=self.batch_tree.yview)
-        batch_scroll.pack(side="right", fill="y")
-        self.batch_tree.configure(yscrollcommand=batch_scroll.set)
-        self.batch_tree.bind("<<TreeviewSelect>>", self.handle_batch_tree_selection)
-        self._configure_quality_tags(self.batch_tree)
-
-        details_frame = ttk.Frame(self.sidebar_pane)
-        self.sidebar_pane.add(details_frame, weight=3)
-        table_frame = ttk.LabelFrame(details_frame, text="Пики", padding=(8, 8))
-        table_frame.pack(fill="both", expand=True, pady=(10, 0))
-        # Keep the values used for manual review in the visible part of the
-        # sidebar.  Area used to sit beyond the right edge of the table.
-        cols = ["display_name", "area", "percent_area", "code", "expected_rt", "found_rt", "status"]
-        peaks_tree_frame = ttk.Frame(table_frame)
-        peaks_tree_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(
-            peaks_tree_frame,
-            columns=cols,
-            show="headings",
-            height=10 if self.compact_ui else 18,
-        )
-        headings = {
-            "display_name": "Пик",
-            "area": "Площадь",
-            "percent_area": "%",
-            "code": "Код",
-            "expected_rt": "RT расч.",
-            "found_rt": "RT найден",
-            "status": "Комментарий",
-        }
-        widths = {
-            "display_name": 190,
-            "area": 105,
-            "percent_area": 58,
-            "code": 85,
-            "expected_rt": 82,
-            "found_rt": 82,
-            "status": 220,
-        }
-        if self.compact_ui:
-            widths.update({
-                "display_name": 150,
-                "area": 85,
-                "percent_area": 48,
-                "code": 70,
-                "expected_rt": 68,
-                "found_rt": 68,
-                "status": 150,
-            })
-        for c in cols:
-            self.tree.heading(c, text=headings[c])
-            width = widths[c]
-            anchor = "w" if c in {"display_name", "status"} else "center"
-            self.tree.column(c, width=width, anchor=anchor)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        peaks_scroll = ttk.Scrollbar(peaks_tree_frame, orient="vertical", command=self.tree.yview)
-        peaks_scroll.grid(row=0, column=1, sticky="ns")
-        peaks_scroll_x = ttk.Scrollbar(peaks_tree_frame, orient="horizontal", command=self.tree.xview)
-        peaks_scroll_x.grid(row=1, column=0, sticky="ew")
-        peaks_tree_frame.rowconfigure(0, weight=1)
-        peaks_tree_frame.columnconfigure(0, weight=1)
-        self.tree.configure(yscrollcommand=peaks_scroll.set, xscrollcommand=peaks_scroll_x.set)
-        self.tree.bind("<<TreeviewSelect>>", self.handle_target_selection)
-
-        manual_frame = ttk.LabelFrame(details_frame, text="Ручная интеграция", padding=(8, 8))
-        manual_frame.pack(fill="x", pady=(10, 0))
-        ttk.Label(manual_frame, text="Start RT").grid(row=0, column=0, sticky="w")
-        ttk.Entry(manual_frame, textvariable=self.manual_start_var, width=12).grid(row=0, column=1, sticky="ew", padx=(6, 10))
-        ttk.Label(manual_frame, text="End RT").grid(row=0, column=2, sticky="w")
-        ttk.Entry(manual_frame, textvariable=self.manual_end_var, width=12).grid(row=0, column=3, sticky="ew", padx=(6, 0))
-        ttk.Button(manual_frame, text="Взять текущие", command=self.load_selected_integration_bounds).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0), padx=(0, 6))
-        ttk.Button(manual_frame, text="Применить", command=self.apply_manual_integration).grid(row=1, column=2, columnspan=2, sticky="ew", pady=(8, 0))
-        manual_frame.columnconfigure(1, weight=1)
-        manual_frame.columnconfigure(3, weight=1)
-
-        status = ttk.Label(self.root, textvariable=self.status_var, anchor="w", padding=(10, 4))
-        status.pack(fill="x")
-        self.update_batch_navigation()
-        self.root.after_idle(self._apply_responsive_pane_positions)
+        self.build_workspace(ChromatogramToolbar)
 
     def export_boundary_history(self):
         if not self.loaded_batches:
@@ -322,6 +150,7 @@ class ChromatogramApp:
             "profile": self.active_instrument_profile,
             "baseline_mode": batch.get("baseline_mode"),
             "changes": batch.get("boundary_history", []),
+            "manual_changes": batch.get("manual_history", []),
         }
         try:
             with open(path, "w", encoding="utf-8") as stream:
@@ -332,23 +161,15 @@ class ChromatogramApp:
         self.status_var.set("История автоматических границ сохранена.")
 
     def _apply_responsive_pane_positions(self):
-        """Give the plot and both sidebar sections useful space on this screen."""
         try:
-            self.root.update_idletasks()
-            pane_width = self.main_pane.winfo_width()
-            pane_height = self.sidebar_pane.winfo_height()
-            if pane_width > 1:
-                plot_fraction = 0.68 if self.compact_ui else 0.72
-                self.main_pane.sashpos(0, max(620, int(pane_width * plot_fraction)))
-            if pane_height > 1:
-                self.sidebar_pane.sashpos(0, max(150, int(pane_height * 0.30)))
+            self.position_workspace()
         except tk.TclError:
             pass
 
     def update_batch_navigation(self):
         total = len(self.loaded_batches)
         if total <= 0:
-            self.batch_var.set("Series: —")
+            self.batch_var.set("Проба: —")
             self.prev_button.state(["disabled"])
             self.next_button.state(["disabled"])
             self.batch_results_button.state(["disabled"])
@@ -361,7 +182,7 @@ class ChromatogramApp:
                     self.batch_tree.delete(item_id)
             return
 
-        self.batch_var.set(f"Series: {self.current_batch_index + 1}/{total}")
+        self.batch_var.set(f"Проба: {self.current_batch_index + 1}/{total}")
         self.batch_results_button.state(["!disabled"])
         if self.current_batch_index > 0:
             self.prev_button.state(["!disabled"])
@@ -405,7 +226,7 @@ class ChromatogramApp:
             recommendation = (
                 "ГОТОВО: экстренная проверка не нашла грубых признаков ошибки"
                 if emergency_judge
-                else "ГОТОВО: по проверкам судьи ручная интеграция не требуется"
+                else "Проверки геометрии пройдены; это не подтверждение аналитической точности"
             )
         lines = [
             f"Рекомендация: {recommendation}",
@@ -431,251 +252,20 @@ class ChromatogramApp:
 
         messagebox.showinfo("Качество пиков", "\n".join(lines), parent=self.root)
 
-    def handle_target_selection(self, event=None):
-        selection = self.tree.selection()
-        self.selected_target_code = selection[0] if selection else None
-        self.load_selected_integration_bounds(silent=True)
-        if self.df_processed is not None:
-            self.update_plot(preserve_view=True)
-            return
 
-    def load_selected_integration_bounds(self, silent: bool = False):
-        if not self.selected_target_code or self.matched_targets_df.empty:
-            self.manual_start_var.set("")
-            self.manual_end_var.set("")
-            if not silent:
-                self.status_var.set("Выбери пик в таблице перед ручной интеграцией.")
+    def export_runtime_diagnostics(self):
+        path = filedialog.asksaveasfilename(parent=self.root, defaultextension=".json", initialfile="omega_diagnostics.json")
+        if not path:
             return
+        payload = runtime.snapshot(self.reference_targets)
+        payload["profile"] = self.active_instrument_profile
+        payload["input_sha256"] = manual_edits.file_digest(self.current_file) if self.current_file else None
+        payload["samples"] = [{"sample": b["sample_name"], "baseline": b.get("baseline_mode"),
+                               "report_status": b.get("report_status"), "reasons": b.get("report_reasons", [])}
+                              for b in self.loaded_batches]
+        Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
+        self.status_var.set("Диагностика окружения и расчёта сохранена.")
 
-        row = self.matched_targets_df[self.matched_targets_df["code"] == self.selected_target_code]
-        if row.empty:
-            self.manual_start_var.set("")
-            self.manual_end_var.set("")
-            return
-        start_x = pd.to_numeric(row["integration_start_x"], errors="coerce").iloc[0]
-        end_x = pd.to_numeric(row["integration_end_x"], errors="coerce").iloc[0]
-        self.manual_start_var.set("" if not np.isfinite(start_x) else f"{float(start_x):.5f}")
-        self.manual_end_var.set("" if not np.isfinite(end_x) else f"{float(end_x):.5f}")
-        if not silent:
-            self.status_var.set(f"Границы {self.selected_target_code} загружены для ручной правки.")
-
-    def apply_manual_integration(self):
-        if self.df_processed is None or self.matched_targets_df.empty:
-            messagebox.showwarning("Ручная интеграция", "Сначала открой CSV и выбери образец.", parent=self.root)
-            return
-        if not self.selected_target_code:
-            messagebox.showwarning("Ручная интеграция", "Сначала выбери пик в таблице справа.", parent=self.root)
-            return
-
-        try:
-            start_x = float(str(self.manual_start_var.get()).replace(",", "."))
-            end_x = float(str(self.manual_end_var.get()).replace(",", "."))
-        except ValueError:
-            messagebox.showerror("Ручная интеграция", "Start RT и End RT должны быть числами.", parent=self.root)
-            return
-        if not (np.isfinite(start_x) and np.isfinite(end_x) and end_x > start_x):
-            messagebox.showerror("Ручная интеграция", "End RT должен быть больше Start RT.", parent=self.root)
-            return
-
-        x_col = _get_x_column_name(self.df_processed)
-        x = self.df_processed[x_col].to_numpy(dtype=float)
-        y = self.df_processed["y_corrected"].to_numpy(dtype=float)
-        if start_x < float(np.nanmin(x)) or end_x > float(np.nanmax(x)):
-            messagebox.showerror("Ручная интеграция", "Границы вне диапазона текущей хроматограммы.", parent=self.root)
-            return
-
-        start_idx = int(np.searchsorted(x, start_x, side="left"))
-        end_idx = int(np.searchsorted(x, end_x, side="right") - 1)
-        start_idx = max(0, min(start_idx, len(x) - 2))
-        end_idx = max(start_idx + 1, min(end_idx, len(x) - 1))
-        segment_y = np.clip(y[start_idx:end_idx + 1], 0.0, None)
-        segment_x = x[start_idx:end_idx + 1]
-        area = float(np.trapezoid(segment_y, segment_x))
-        apex_idx = int(start_idx + np.argmax(segment_y))
-
-        row_mask = self.matched_targets_df["code"] == self.selected_target_code
-        if not row_mask.any():
-            messagebox.showerror("Ручная интеграция", f"Пик {self.selected_target_code} не найден в таблице.", parent=self.root)
-            return
-        row_idx = self.matched_targets_df.index[row_mask][0]
-        old_status = str(self.matched_targets_df.at[row_idx, "status"] or "")
-        manual_status = old_status if "manual" in old_status else f"{old_status}_manual" if old_status else "manual"
-        self.matched_targets_df.at[row_idx, "integration_start_x"] = float(x[start_idx])
-        self.matched_targets_df.at[row_idx, "integration_end_x"] = float(x[end_idx])
-        self.matched_targets_df.at[row_idx, "found_rt"] = float(x[apex_idx])
-        self.matched_targets_df.at[row_idx, "area"] = area
-        self.matched_targets_df.at[row_idx, "matched_peak_id"] = np.nan
-        self.matched_targets_df.at[row_idx, "match_score"] = np.nan
-        self.matched_targets_df.at[row_idx, "status"] = manual_status
-        self.matched_targets_df = _recompute_matched_percent_area(self.matched_targets_df)
-        self.manual_start_var.set(f"{float(x[start_idx]):.5f}")
-        self.manual_end_var.set(f"{float(x[end_idx]):.5f}")
-        self.selected_target_code = str(self.selected_target_code)
-        # Keep the existing axes intact: clearing/recreating them also resets
-        # Matplotlib toolbar zoom history even when xlim/ylim are restored.
-        self.refresh_peaks(redraw_plot=False)
-        if self._manual_overlay_artists:
-            self._manual_drag_axis = None
-            self._manual_drag_pending_bounds = (float(x[start_idx]), float(x[end_idx]))
-            self._flush_manual_drag_overlay()
-        else:
-            self.update_plot(preserve_view=True)
-        if self.selected_target_code in self.tree.get_children():
-            self.tree.selection_set(self.selected_target_code)
-            self.tree.focus(self.selected_target_code)
-        self.status_var.set(
-            f"Ручная интеграция {self.selected_target_code}: {x[start_idx]:.5f}–{x[end_idx]:.5f}, area {area:.4f}"
-        )
-
-    def _manual_bounds_from_vars(self):
-        try:
-            start_x = float(str(self.manual_start_var.get()).replace(",", "."))
-            end_x = float(str(self.manual_end_var.get()).replace(",", "."))
-        except ValueError:
-            return np.nan, np.nan
-        return start_x, end_x
-
-    def _selected_manual_drag_bounds(self):
-        if not self.selected_target_code or self.matched_targets_df.empty:
-            return np.nan, np.nan
-        start_x, end_x = self._manual_bounds_from_vars()
-        if np.isfinite(start_x) and np.isfinite(end_x):
-            return start_x, end_x
-        row = self.matched_targets_df[self.matched_targets_df["code"] == self.selected_target_code]
-        if row.empty:
-            return np.nan, np.nan
-        start_x = pd.to_numeric(row["integration_start_x"], errors="coerce").iloc[0]
-        end_x = pd.to_numeric(row["integration_end_x"], errors="coerce").iloc[0]
-        return float(start_x), float(end_x)
-
-    def handle_manual_boundary_press(self, event):
-        if event.button != 1 or event.inaxes not in [self.ax, *getattr(self, "preview_axes", [])]:
-            return
-        if event.xdata is None or self.df_processed is None or not self.selected_target_code:
-            return
-        start_x, end_x = self._selected_manual_drag_bounds()
-        if not (np.isfinite(start_x) and np.isfinite(end_x)):
-            return
-
-        x_min, x_max = event.inaxes.get_xlim()
-        tolerance = max(0.0025, abs(float(x_max) - float(x_min)) * 0.010)
-        distances = {"start": abs(float(event.xdata) - start_x), "end": abs(float(event.xdata) - end_x)}
-        boundary, distance = min(distances.items(), key=lambda item: item[1])
-        if distance > tolerance:
-            return
-        self._manual_drag_active_boundary = boundary
-        self._manual_drag_axis = event.inaxes
-        self.status_var.set(f"Тяни {'левую' if boundary == 'start' else 'правую'} границу {self.selected_target_code} мышкой…")
-
-    def handle_manual_boundary_motion(self, event):
-        if self._manual_drag_active_boundary is None or event.xdata is None or self.df_processed is None:
-            return
-        x_col = _get_x_column_name(self.df_processed)
-        x_values = self.df_processed[x_col].to_numpy(dtype=float)
-        x_value = float(np.clip(float(event.xdata), float(np.nanmin(x_values)), float(np.nanmax(x_values))))
-        start_x, end_x = self._selected_manual_drag_bounds()
-        if self._manual_drag_active_boundary == "start":
-            if np.isfinite(end_x):
-                x_value = min(x_value, float(end_x) - 1e-5)
-            self.manual_start_var.set(f"{x_value:.5f}")
-        else:
-            if np.isfinite(start_x):
-                x_value = max(x_value, float(start_x) + 1e-5)
-            self.manual_end_var.set(f"{x_value:.5f}")
-        self._manual_drag_pending_bounds = self._manual_bounds_from_vars()
-        if self._manual_drag_after_id is None:
-            self._manual_drag_after_id = self.root.after(16, self._flush_manual_drag_overlay)
-
-    def _flush_manual_drag_overlay(self):
-        self._manual_drag_after_id = None
-        bounds = self._manual_drag_pending_bounds
-        self._manual_drag_pending_bounds = None
-        if bounds is None:
-            return
-        start_x, end_x = bounds
-        if not np.all(np.isfinite([start_x, end_x])) or end_x <= start_x:
-            return
-        drag_axis = self._manual_drag_axis
-        overlay_items = (
-            [(drag_axis, self._manual_overlay_artists[drag_axis])]
-            if drag_axis in self._manual_overlay_artists
-            else list(self._manual_overlay_artists.items())
-        )
-        changed_axes = []
-        for axis, artists in overlay_items:
-            try:
-                x = artists["x"]
-                fill_y = artists["fill_y"]
-                start_idx = max(0, min(int(np.searchsorted(x, start_x, side="left")), len(x) - 2))
-                end_idx = max(start_idx + 1, min(int(np.searchsorted(x, end_x, side="right") - 1), len(x) - 1))
-                artists["fill"].remove()
-                artists["fill"] = axis.fill_between(
-                    x[start_idx:end_idx + 1],
-                    0.0,
-                    fill_y[start_idx:end_idx + 1],
-                    color="#ff4d6d",
-                    alpha=0.36 if artists["compact"] else 0.40,
-                    linewidth=0.0,
-                    zorder=3,
-                )
-                visual_fill_artist = artists.get("visual_fill")
-                if visual_fill_artist is not None:
-                    visual_fill_artist.remove()
-                    selected_match = self.matched_targets_df[
-                        self.matched_targets_df["code"] == self.selected_target_code
-                    ]
-                    if not selected_match.empty:
-                        visual_row = selected_match.iloc[0].copy()
-                        visual_row["integration_start_x"] = start_x
-                        visual_row["integration_end_x"] = end_x
-                        visual_start_x, visual_end_x = self._visual_peak_footprint_bounds(
-                            visual_row,
-                            x,
-                            artists["y_smooth"],
-                        )
-                        visual_start_idx = int(np.argmin(np.abs(x - visual_start_x)))
-                        visual_end_idx = int(np.argmin(np.abs(x - visual_end_x)))
-                        artists["visual_fill"] = axis.fill_between(
-                            x[visual_start_idx:visual_end_idx + 1],
-                            0.0,
-                            artists["visual_fill_y"][visual_start_idx:visual_end_idx + 1],
-                            color="#ff7c96",
-                            alpha=0.26 if artists["compact"] else 0.28,
-                            linewidth=0.0,
-                            zorder=2.7,
-                        )
-                artists["start_line"].set_xdata([start_x, start_x])
-                artists["end_line"].set_xdata([end_x, end_x])
-                apex_idx = int(start_idx + np.argmax(fill_y[start_idx:end_idx + 1]))
-                marker = artists.get("marker")
-                if marker is not None:
-                    marker.set_offsets(np.asarray([[x[apex_idx], artists["marker_y"][apex_idx]]]))
-                annotation = artists.get("annotation")
-                if annotation is not None:
-                    annotation.xy = (x[apex_idx], artists["marker_y"][apex_idx])
-                    annotation.set_text(f"{self.selected_target_code}  RT {x[apex_idx]:.4f}")
-                changed_axes.append(axis)
-            except (KeyError, ValueError, RuntimeError):
-                continue
-        try:
-            renderer = self.canvas.get_renderer()
-            for axis in changed_axes:
-                axis.draw(renderer)
-                self.canvas.blit(axis.bbox)
-        except (AttributeError, RuntimeError, tk.TclError):
-            self.canvas.draw_idle()
-
-    def handle_manual_boundary_release(self, event):
-        if self._manual_drag_active_boundary is None:
-            return
-        self._manual_drag_active_boundary = None
-        if self._manual_drag_after_id is not None:
-            self.root.after_cancel(self._manual_drag_after_id)
-            self._manual_drag_after_id = None
-        self._manual_drag_pending_bounds = None
-        self._manual_drag_axis = None
-        self.status_var.set(f"Граница {self.selected_target_code} изменена мышью; пересчитываю пик…")
-        self.apply_manual_integration()
 
     def handle_batch_tree_selection(self, event=None):
         if self._batch_tree_syncing or self.batch_tree is None:
@@ -688,14 +278,14 @@ class ChromatogramApp:
             self.load_batch_at_index(target_index)
 
     def prev_batch(self):
-        if self.current_batch_index <= 0:
-            return
-        self.load_batch_at_index(self.current_batch_index - 1)
+        visible = [int(i) for i in self.batch_tree.get_children() if int(i) < self.current_batch_index]
+        if visible:
+            self.load_batch_at_index(visible[-1])
 
     def next_batch(self):
-        if self.current_batch_index >= len(self.loaded_batches) - 1:
-            return
-        self.load_batch_at_index(self.current_batch_index + 1)
+        visible = [int(i) for i in self.batch_tree.get_children() if int(i) > self.current_batch_index]
+        if visible:
+            self.load_batch_at_index(visible[0])
 
     def process_batch(self, batch: dict):
         if batch.get("processed_df") is not None:
@@ -704,6 +294,7 @@ class ChromatogramApp:
         return batch
 
     def load_batch_at_index(self, index: int):
+        self.cancel_manual_pick()
         if index < 0 or index >= len(self.loaded_batches):
             return
 
@@ -713,9 +304,10 @@ class ChromatogramApp:
         self.current_batch_index = index
         self.current_sample_name = batch["sample_name"]
         self.file_var.set(
-            f"Файл: {self.current_file.name} | Sample: {self.current_sample_name} | Source: {batch.get('file_name', '')}"
+            f"{self.current_file.name}  /  {self.current_sample_name}"
         )
 
+        self.sample_title_var.set(f"Проба {self.current_sample_name}")
         self.df_processed = batch["processed_df"]
         self.best_window = batch["best_window"]
         self.peaks_df = batch["peaks_df"]
@@ -734,9 +326,9 @@ class ChromatogramApp:
 
     @staticmethod
     def _configure_quality_tags(tree: ttk.Treeview):
-        tree.tag_configure("quality_stop", background="#ffd9dc", foreground="#8a1020")
-        tree.tag_configure("quality_check", background="#fff0c7", foreground="#6b4a00")
-        tree.tag_configure("quality_good", background="#def3e5", foreground="#155b32")
+        tree.tag_configure("quality_stop", background="#FCE4E7", foreground="#A52234")
+        tree.tag_configure("quality_check", background="#FFF5DF", foreground="#805500")
+        tree.tag_configure("quality_good", background="#FFFFFF", foreground="#25714A")
         tree.tag_configure("quality_pending", foreground="#6f7780")
 
     @staticmethod
@@ -772,7 +364,7 @@ class ChromatogramApp:
             return "ГОТОВО — перепроверено автоматически", "quality_good"
         if isinstance(risk, dict) and risk.get("instrument_profile_judge_emergency_enabled"):
             return "ГОТОВО — экстренная проверка пройдена", "quality_good"
-        return "ГОТОВО — правка не нужна", "quality_good"
+        return "ПРОВЕРКИ ПРОЙДЕНЫ", "quality_good"
 
     def build_batch_results_rows(self, process_all: bool = False):
         def percent_text(batch: dict, code: str) -> str:
@@ -834,7 +426,22 @@ class ChromatogramApp:
             gamma_linolenic_text,
             quality_tag,
         ) in self.build_batch_results_rows(process_all=process_all):
-            display_name = self._sample_number(sample_name) if tree is self.batch_results_tree else sample_name
+            if tree is self.batch_tree:
+                query = self.sample_search_var.get().strip().casefold()
+                if query and query not in str(sample_name).casefold():
+                    continue
+                if self.review_only_var.get() and quality_tag not in ('quality_check','quality_stop'):
+                    continue
+                selected_filter = self.review_filter_var.get()
+                if selected_filter == 'Требуют проверки' and quality_tag not in ('quality_check','quality_stop'):
+                    continue
+                if selected_filter == 'Требуют обязательной проверки' and quality_tag != 'quality_stop':
+                    continue
+                confidence_text = {'quality_good':'Готово', 'quality_check':'Проверить', 'quality_stop':'Стоп', 'quality_pending':'Ожидание'}[quality_tag]
+                display_name = str(sample_name).split('_', 1)[0] if re.match(r'^O\d+_', str(sample_name), flags=re.IGNORECASE) else str(sample_name)
+                value_text = f'{float(value_text):.2f}' if value_text else '?'
+            else:
+                display_name = self._sample_number(sample_name)
             values = (
                 display_name,
                 value_text,
@@ -843,6 +450,9 @@ class ChromatogramApp:
                 linoleic_text,
                 gamma_linolenic_text,
             ) if show_confidence else (display_name, value_text)
+            if tree is self.batch_results_tree and show_confidence:
+                values = (display_name, value_text, arachidonic_text,
+                          linoleic_text, gamma_linolenic_text, confidence_text)
             tree.insert("", "end", iid=str(index), values=values, tags=(quality_tag,))
         if selected_iid is not None and tree.exists(selected_iid):
             self._batch_tree_syncing = True
@@ -853,6 +463,13 @@ class ChromatogramApp:
 
     def populate_main_batch_tree(self):
         self._populate_batch_tree_widget(self.batch_tree, process_all=False)
+        if hasattr(self, 'sample_count_var'):
+            count = len(self.batch_tree.get_children())
+            self.sample_count_var.set(f'Показано {count} из {len(self.loaded_batches)}')
+            self.filter_description.configure(text='Красные пробы: обязательная проверка' if self.review_filter_var.get() == 'Требуют обязательной проверки' else '')
+            visible = [int(i) for i in self.batch_tree.get_children()]
+            self.prev_button.state(['!disabled'] if any(i < self.current_batch_index for i in visible) else ['disabled'])
+            self.next_button.state(['!disabled'] if any(i > self.current_batch_index for i in visible) else ['disabled'])
 
     def copy_batch_results(self, selected_only: bool):
         if self.batch_results_tree is None:
@@ -901,7 +518,7 @@ class ChromatogramApp:
             return
 
         self.batch_results_window = tk.Toplevel(self.root)
-        self.batch_results_window.title("Batch Results")
+        self.batch_results_window.title("Результаты серии")
         self.batch_results_window.geometry("1200x650")
         self.batch_results_window.minsize(900, 420)
 
@@ -910,19 +527,19 @@ class ChromatogramApp:
 
         toolbar = ttk.Frame(frame)
         toolbar.pack(fill="x", pady=(0, 8))
-        ttk.Button(toolbar, text="Copy Selected", command=lambda: self.copy_batch_results(selected_only=True)).pack(side="left")
-        ttk.Button(toolbar, text="Copy All", command=lambda: self.copy_batch_results(selected_only=False)).pack(side="left", padx=(8, 0))
-        ttk.Button(toolbar, text="Open Selected", command=self.jump_to_batch_from_results).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Копировать выбранные", command=lambda: self.copy_batch_results(selected_only=True)).pack(side="left")
+        ttk.Button(toolbar, text="Копировать всё", command=lambda: self.copy_batch_results(selected_only=False)).pack(side="left", padx=(8, 0))
+        ttk.Button(toolbar, text="Открыть пробу", command=self.jump_to_batch_from_results).pack(side="left", padx=(8, 0))
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
         columns = (
             "sample_name",
             "omega_value",
-            "confidence",
             "arachidonic",
             "linoleic",
             "gamma_linolenic",
+            "confidence",
         )
         self.batch_results_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=18, selectmode="extended")
         self.batch_results_tree.heading("sample_name", text="Номер образца")
@@ -958,437 +575,97 @@ class ChromatogramApp:
         self.batch_results_window.protocol("WM_DELETE_WINDOW", on_close)
         self.populate_batch_results_tree()
 
-    def _refresh_profile_combo(self):
-        if self.profile_combo is None:
+
+    def open_file(self, profile_id=None):
+        if self._background_future is not None or self._preload_after_id is not None:
             return
-        names = [profile["name"] for profile in self.profile_store.get("profiles", [])]
-        self.profile_combo.configure(values=names)
-        self.profile_var.set(self.active_instrument_profile["name"])
-
-    def _profile_by_id(self, profile_id: str):
-        for profile in self.profile_store.get("profiles", []):
-            if str(profile.get("id")) == str(profile_id):
-                return profile
-        return None
-
-    def on_profile_combo_selected(self, event=None):
-        name = self.profile_var.get()
-        profile = next(
-            (item for item in self.profile_store.get("profiles", []) if item.get("name") == name),
-            None,
-        )
-        if profile is None:
-            self.profile_var.set(self.active_instrument_profile["name"])
-            return
-        self.activate_instrument_profile(profile["id"])
-
-    def activate_instrument_profile(self, profile_id: str, force_recalculate: bool = False):
-        profile = self._profile_by_id(profile_id)
-        if profile is None:
-            return False
-        changed = str(profile_id) != str(self.active_instrument_profile.get("id"))
-        if self.loaded_batches and (changed or force_recalculate):
-            confirmed = messagebox.askyesno(
-                "Сменить профиль прибора",
-                "Все загруженные пробы будут последовательно пересчитаны с новым профилем. Продолжить?",
-                parent=self.profile_window if self.profile_window is not None else self.root,
+        try:
+            file_path = filedialog.askopenfilename(parent=self.root, title="Выберите CSV", filetypes=[("CSV", "*.csv *.CSV"), ("All", "*.*")])
+            if not file_path:
+                return
+            logging.getLogger("omega").info("Reading CSV: %s", file_path)
+            self.show_batch_progress_window()
+            self.batch_progress_label_var.set("Чтение CSV…")
+            self.batch_progress_detail_var.set(Path(file_path).name)
+            self.batch_progress_bar.configure(mode="indeterminate")
+            self.batch_progress_bar.start(50)
+            self.status_var.set("Чтение CSV…")
+            self._run_background(
+                lambda: omega_core.load_batches(Path(file_path), cutoff_minutes=4.0),
+                lambda batches: self.finish_new_calculation(Path(file_path), batches, profile_id),
             )
-            if not confirmed:
-                self.profile_var.set(self.active_instrument_profile["name"])
-                return False
+        except Exception:
+            self.report_callback_exception(*sys.exc_info())
 
-        self.profile_store["active_profile_id"] = str(profile_id)
-        self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
-        self.active_instrument_profile = instrument_profiles.active_profile(self.profile_store)
-        self.reference_targets = instrument_profiles.apply_profile_to_targets(
-            self.base_reference_targets, self.active_instrument_profile
-        )
-        self._refresh_profile_combo()
-        if self.loaded_batches and (changed or force_recalculate):
-            self.recalculate_loaded_batches()
-        else:
-            self.status_var.set(f"Активный профиль: {self.active_instrument_profile['name']}")
-        return True
-
-    def recalculate_loaded_batches(self):
-        if self._preload_after_id is not None:
-            self.root.after_cancel(self._preload_after_id)
-            self._preload_after_id = None
-        preserved = {"file_name", "signal_name", "acquired_at", "source_path", "sample_name", "dataframe"}
-        for batch in self.loaded_batches:
-            for key in list(batch):
-                if key not in preserved:
-                    del batch[key]
+    def _finish_file_load(self, file_path, batches):
+        if not batches:
+            raise ValueError("В CSV нет проб для анализа.")
+        self.current_file = file_path
+        self.loaded_batches = batches
+        # A newly read file must never retain a previous file's plot or number.
         self.df_processed = None
         self.peaks_df = pd.DataFrame()
         self.matched_targets_df = pd.DataFrame()
+        self.current_confidence = None
+        self.selected_target_code = None
+        self.current_sample_name = ""
+        self.current_batch_index = 0
+        self.omega_var.set("Расчёт…")
+        self.manual_start_var.set("")
+        self.manual_end_var.set("")
+        self.sample_title_var.set("Загрузка проб…")
+        self.sample_search_var.set("")
+        self.review_only_var.set(False)
+        self.review_filter_var.set('Все пробы')
+        self.update_review_panel()
+        self.confidence_button.state(['disabled'])
+        self.file_var.set(f"Файл: {file_path.name}")
+        for tree in (self.tree, self.batch_tree, self.batch_results_tree):
+            if tree is not None and tree.winfo_exists():
+                tree.delete(*tree.get_children())
+        for axis in self.figure.axes:
+            axis.clear()
+        self._manual_overlay_artists = {}
+        self.canvas.draw_idle()
+        logging.getLogger("omega").info("CSV read complete: %d samples", len(batches))
         self._preload_batch_index = 0
-        self.show_batch_progress_window()
-        self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
+        self.batch_progress_bar.stop()
+        self.batch_progress_bar.configure(mode="determinate", maximum=len(batches), value=0)
+        self.status_var.set(f"Загружено проб: {len(batches)}. Запускаю расчёт.")
+        self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
 
-    def open_profile_manager(self):
-        if self.profile_window is not None and self.profile_window.winfo_exists():
-            self.profile_window.deiconify()
-            self.profile_window.lift()
-            return
+    def report_callback_exception(self, exc_type, exc, tb):
+        logging.getLogger("omega").error("GUI operation failed", exc_info=(exc_type, exc, tb))
+        self.close_batch_progress_window()
+        self.status_var.set(f"Ошибка: {exc}")
+        messagebox.showerror("Ошибка анализа", str(exc), parent=self.root)
 
-        window = tk.Toplevel(self.root)
-        self.profile_window = window
-        window.title("Профили приборов и колонок")
-        window.geometry("930x620")
-        window.minsize(760, 500)
-        window.transient(self.root)
+    def _run_background(self, work, on_success):
+        """Run data work off Tk's thread; deliver results only from the Tk timer."""
+        if self._background_future is not None:
+            raise RuntimeError("Расчёт уже выполняется.")
+        future = Future()
+        self._background_future = future
 
-        container = ttk.Frame(window, padding=12)
-        container.pack(fill="both", expand=True)
-        panes = ttk.Panedwindow(container, orient="horizontal")
-        panes.pack(fill="both", expand=True)
-        left = ttk.Frame(panes)
-        right = ttk.Frame(panes, padding=(12, 0, 0, 0))
-        panes.add(left, weight=2)
-        panes.add(right, weight=3)
-
-        profile_tree = ttk.Treeview(
-            left,
-            columns=("name", "multiplier", "judge"),
-            show="headings",
-            selectmode="browse",
-        )
-        profile_tree.heading("name", text="Профиль")
-        profile_tree.heading("multiplier", text="Множитель")
-        profile_tree.heading("judge", text="Судья")
-        profile_tree.column("name", width=150, anchor="w")
-        profile_tree.column("multiplier", width=65, anchor="center", stretch=False)
-        profile_tree.column("judge", width=165, anchor="w")
-        profile_tree.pack(fill="both", expand=True)
-
-        left_buttons = ttk.Frame(left)
-        left_buttons.pack(fill="x", pady=(8, 0))
-
-        profile_name_var = tk.StringVar()
-        multiplier_var = tk.StringVar(value="1.0")
-        calculation_labels = {
-            "Совместимый Omega v2.7": instrument_profiles.LEGACY_CALCULATION_MODE,
-            "Прямой расчёт по выбранным площадям": instrument_profiles.DIRECT_COMPONENTS_CALCULATION_MODE,
-        }
-        calculation_mode_var = tk.StringVar(value="Совместимый Omega v2.7")
-        component_codes_var = tk.StringVar(
-            value=", ".join(instrument_profiles.DEFAULT_OMEGA_COMPONENT_CODES)
-        )
-        judge_status_var = tk.StringVar(value="Судья: —")
-        form = ttk.Frame(right)
-        form.pack(fill="x")
-        ttk.Label(form, text="Название").grid(row=0, column=0, sticky="w")
-        name_entry = ttk.Entry(form, textvariable=profile_name_var)
-        name_entry.grid(row=0, column=1, sticky="ew", padx=(8, 0))
-        ttk.Label(form, text="Множитель итогового результата").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        multiplier_entry = ttk.Entry(form, textvariable=multiplier_var, width=14)
-        multiplier_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
-        ttk.Label(form, text="Схема расчёта").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        calculation_combo = ttk.Combobox(
-            form,
-            textvariable=calculation_mode_var,
-            values=list(calculation_labels),
-            state="readonly",
-            width=38,
-        )
-        calculation_combo.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(form, text="Пики числителя через запятую").grid(
-            row=3, column=0, sticky="w", pady=(8, 0)
-        )
-        component_codes_entry = ttk.Entry(form, textvariable=component_codes_var)
-        component_codes_entry.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 0))
-        ttk.Label(form, text="Калибровка судьи").grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(form, textvariable=judge_status_var).grid(
-            row=4, column=1, sticky="w", padx=(8, 0), pady=(8, 0)
-        )
-        form.columnconfigure(1, weight=1)
-
-        ttk.Label(
-            right,
-            text="Времена выхода, мин. Двойной щелчок по строке — изменить RT.",
-        ).pack(fill="x", pady=(12, 5))
-        rt_tree = ttk.Treeview(right, columns=("code", "display", "rt"), show="headings", selectmode="browse")
-        rt_tree.heading("code", text="Код")
-        rt_tree.heading("display", text="Кислота")
-        rt_tree.heading("rt", text="RT, мин")
-        rt_tree.column("code", width=100, anchor="center", stretch=False)
-        rt_tree.column("display", width=245, anchor="w")
-        rt_tree.column("rt", width=100, anchor="center", stretch=False)
-        rt_tree.pack(fill="both", expand=True)
-
-        actions = ttk.Frame(right)
-        actions.pack(fill="x", pady=(8, 0))
-
-        def selected_id():
-            selection = profile_tree.selection()
-            return selection[0] if selection else None
-
-        def load_details(event=None):
-            profile = self._profile_by_id(selected_id()) if selected_id() else None
-            if profile is None:
-                return
-            profile_name_var.set(profile["name"])
-            multiplier_var.set(f"{float(profile.get('result_multiplier', 1.0)):.8g}")
-            mode = str(
-                profile.get(
-                    "calculation_mode", instrument_profiles.LEGACY_CALCULATION_MODE
-                )
-            )
-            calculation_mode_var.set(
-                next(
-                    (label for label, value in calculation_labels.items() if value == mode),
-                    "Совместимый Omega v2.7",
-                )
-            )
-            component_codes_var.set(
-                ", ".join(
-                    profile.get(
-                        "omega_component_codes",
-                        instrument_profiles.DEFAULT_OMEGA_COMPONENT_CODES,
-                    )
-                )
-            )
-            judge_status_var.set(instrument_profiles.judge_calibration_label(profile))
-            for item in rt_tree.get_children():
-                rt_tree.delete(item)
-            names = self.base_reference_targets.set_index("code")["display_name"].to_dict()
-            for code in self.base_reference_targets.sort_values("order_index")["code"].astype(str):
-                value = profile["retention_times"].get(code, np.nan)
-                rt_tree.insert("", "end", iid=code, values=(code, names.get(code, code), f"{float(value):.4f}"))
-            locked = str(profile.get("id")) == instrument_profiles.LEGACY_PROFILE_ID
-            state = "disabled" if locked else "normal"
-            name_entry.configure(state=state)
-            multiplier_entry.configure(state=state)
-            calculation_combo.configure(state="disabled" if locked else "readonly")
-            component_codes_entry.configure(state=state)
-
-        def reload_profiles(select_profile_id=None):
-            for item in profile_tree.get_children():
-                profile_tree.delete(item)
-            active_id = str(self.profile_store.get("active_profile_id"))
-            for profile in self.profile_store.get("profiles", []):
-                marker = "● " if str(profile["id"]) == active_id else ""
-                profile_tree.insert(
-                    "", "end", iid=str(profile["id"]),
-                    values=(
-                        marker + profile["name"],
-                        f"{float(profile.get('result_multiplier', 1.0)):.6g}",
-                        instrument_profiles.judge_calibration_label(profile),
-                    ),
-                )
-            target = str(select_profile_id or active_id)
-            if profile_tree.exists(target):
-                profile_tree.selection_set(target)
-                profile_tree.focus(target)
-                profile_tree.see(target)
-            load_details()
-
-        def edit_rt(event=None):
-            profile = self._profile_by_id(selected_id()) if selected_id() else None
-            selection = rt_tree.selection()
-            if profile is None or not selection:
-                return
-            if str(profile.get("id")) == instrument_profiles.LEGACY_PROFILE_ID:
-                messagebox.showinfo("Встроенный профиль", "Сначала создайте копию встроенного профиля.", parent=window)
-                return
-            code = selection[0]
-            current = float(rt_tree.item(code, "values")[2])
-            value = simpledialog.askfloat(
-                "Время выхода", f"RT для {code}, мин:", initialvalue=current,
-                minvalue=0.001, maxvalue=100.0, parent=window,
-            )
-            if value is not None:
-                values = list(rt_tree.item(code, "values"))
-                values[2] = f"{value:.4f}"
-                rt_tree.item(code, values=values)
-
-        def save_edits():
-            profile_id = selected_id()
-            profile = self._profile_by_id(profile_id) if profile_id else None
-            if profile is None:
-                return False
-            if str(profile_id) == instrument_profiles.LEGACY_PROFILE_ID:
-                messagebox.showinfo("Встроенный профиль", "Встроенный профиль неизменяем. Создайте его копию.", parent=window)
-                return False
-            candidate = dict(profile)
-            candidate["name"] = profile_name_var.get().strip()
-            candidate["result_multiplier"] = multiplier_var.get().strip()
-            candidate["calculation_mode"] = calculation_labels.get(
-                calculation_mode_var.get(), instrument_profiles.LEGACY_CALCULATION_MODE
-            )
-            candidate["omega_component_codes"] = [
-                code.strip()
-                for code in component_codes_var.get().split(",")
-                if code.strip()
-            ]
-            candidate["retention_times"] = {
-                code: rt_tree.item(code, "values")[2] for code in rt_tree.get_children()
-            }
-            # Preserve full precision when the operator did not edit a cell.
-            for code, value in candidate["retention_times"].items():
-                original = float(profile["retention_times"][code])
-                if float(value) == float(f"{original:.4f}"):
-                    candidate["retention_times"][code] = original
-            if any(float(value) != float(profile["retention_times"][code])
-                   for code, value in candidate["retention_times"].items()):
-                candidate["custom_rt"] = True
+        def run():
             try:
-                candidate = instrument_profiles.validate_profile(
-                    candidate, self.base_reference_targets.sort_values("order_index")["code"].astype(str)
-                )
-                duplicate = next(
-                    (item for item in self.profile_store["profiles"]
-                     if item["id"] != profile_id and item["name"].casefold() == candidate["name"].casefold()),
-                    None,
-                )
-                if duplicate is not None:
-                    raise ValueError("Профиль с таким названием уже существует.")
-            except (ValueError, TypeError) as exc:
-                messagebox.showerror("Профиль не сохранён", str(exc), parent=window)
-                return False
-            calibration_inputs_changed = bool(
-                float(candidate.get("result_multiplier", 1.0))
-                != float(profile.get("result_multiplier", 1.0))
-                or candidate.get("calculation_mode") != profile.get("calculation_mode")
-                or candidate.get("omega_component_codes") != profile.get("omega_component_codes")
-                or candidate.get("retention_times") != profile.get("retention_times")
-            )
-            if calibration_inputs_changed:
-                candidate.update({
-                    "judge_calibrated": False,
-                    "judge_emergency_enabled": False,
-                    "judge_manual_samples": 0,
-                    "judge_error_samples": 0,
-                    "judge_validation_batches": 0,
-                    "judge_c22_height_priority_threshold": None,
-                })
-            old_profile = dict(profile)
-            old_profile["retention_times"] = dict(profile["retention_times"])
-            changed_index = None
-            for index, item in enumerate(self.profile_store["profiles"]):
-                if str(item["id"]) == str(profile_id):
-                    self.profile_store["profiles"][index] = candidate
-                    changed_index = index
-                    break
-            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
-            if str(profile_id) == str(self.active_instrument_profile.get("id")):
-                if not self.activate_instrument_profile(profile_id, force_recalculate=True):
-                    if changed_index is not None:
-                        self.profile_store["profiles"][changed_index] = old_profile
-                        self.profile_store = instrument_profiles.save_store(
-                            self.profile_store, self.base_reference_targets
-                        )
-                    return False
-            self._refresh_profile_combo()
-            reload_profiles(profile_id)
-            return True
+                future.set_result(work())
+            except BaseException as exc:
+                future.set_exception(exc)
 
-        def create_profile(copy_selected=False):
-            source = self._profile_by_id(selected_id()) if copy_selected and selected_id() else None
-            default_name = f"{source['name']} — копия" if source else "Новый прибор"
-            name = simpledialog.askstring("Новый профиль", "Название профиля:", initialvalue=default_name, parent=window)
-            if not name:
+        def poll():
+            self._preload_after_id = None
+            if not future.done():
+                self._preload_after_id = self.root.after(50, poll)
                 return
-            name = instrument_profiles.unique_profile_name(self.profile_store, name)
-            profile = (
-                instrument_profiles.copy_profile(source, name)
-                if source else instrument_profiles.new_profile(name, self.base_reference_targets)
-            )
-            self.profile_store["profiles"].append(profile)
-            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
-            reload_profiles(profile["id"])
-            self._refresh_profile_combo()
-
-        def delete_profile():
-            profile_id = selected_id()
-            if not profile_id or profile_id == instrument_profiles.LEGACY_PROFILE_ID:
-                return
-            if str(profile_id) == str(self.profile_store.get("active_profile_id")):
-                messagebox.showerror("Нельзя удалить", "Сначала сделайте активным другой профиль.", parent=window)
-                return
-            profile = self._profile_by_id(profile_id)
-            if not messagebox.askyesno("Удалить профиль", f"Удалить «{profile['name']}»?", parent=window):
-                return
-            self.profile_store["profiles"] = [item for item in self.profile_store["profiles"] if item["id"] != profile_id]
-            self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
-            reload_profiles()
-            self._refresh_profile_combo()
-
-        def activate_selected():
-            profile_id = selected_id()
-            if profile_id and self.activate_instrument_profile(profile_id):
-                reload_profiles(profile_id)
-
-        def export_selected():
-            profile = self._profile_by_id(selected_id()) if selected_id() else None
-            if profile is None:
-                return
-            path = filedialog.asksaveasfilename(
-                title="Экспорт профиля", defaultextension=instrument_profiles.PROFILE_FILE_SUFFIX,
-                filetypes=[("Профиль Omega", "*.omega-profile.json"), ("JSON", "*.json")],
-                initialfile=f"{profile['name']}{instrument_profiles.PROFILE_FILE_SUFFIX}", parent=window,
-            )
-            if path:
-                instrument_profiles.export_profile(
-                    profile, Path(path), self.base_reference_targets.sort_values("order_index")["code"].astype(str)
-                )
-
-        def import_one():
-            path = filedialog.askopenfilename(
-                title="Импорт профиля", filetypes=[("Профиль Omega", "*.omega-profile.json *.json"), ("Все файлы", "*.*")],
-                parent=window,
-            )
-            if not path:
-                return
+            self._background_future = None
             try:
-                profile = instrument_profiles.import_profile(Path(path), self.profile_store, self.base_reference_targets)
-                self.profile_store["profiles"].append(profile)
-                self.profile_store = instrument_profiles.save_store(self.profile_store, self.base_reference_targets)
-            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-                messagebox.showerror("Импорт не выполнен", str(exc), parent=window)
-                return
-            reload_profiles(profile["id"])
-            self._refresh_profile_combo()
+                on_success(future.result())
+            except Exception:
+                self.report_callback_exception(*sys.exc_info())
 
-        profile_tree.bind("<<TreeviewSelect>>", load_details)
-        rt_tree.bind("<Double-1>", edit_rt)
-        ttk.Button(left_buttons, text="Новый", command=lambda: create_profile(False)).pack(side="left")
-        ttk.Button(left_buttons, text="Копия", command=lambda: create_profile(True)).pack(side="left", padx=(6, 0))
-        ttk.Button(left_buttons, text="Удалить", command=delete_profile).pack(side="left", padx=(6, 0))
-        ttk.Button(actions, text="Изменить RT", command=edit_rt).pack(side="left")
-        ttk.Button(actions, text="Сохранить", command=save_edits).pack(side="left", padx=(6, 0))
-        ttk.Button(actions, text="Сделать активным", command=activate_selected).pack(side="left", padx=(6, 0))
-        ttk.Button(actions, text="Импорт", command=import_one).pack(side="right")
-        ttk.Button(actions, text="Экспорт", command=export_selected).pack(side="right", padx=(0, 6))
-
-        def on_close():
-            window.destroy()
-            self.profile_window = None
-
-        window.protocol("WM_DELETE_WINDOW", on_close)
-        reload_profiles()
-
-    def open_file(self):
-        file_path = filedialog.askopenfilename(title="Выберите CSV", filetypes=[("CSV", "*.csv *.CSV"), ("All", "*.*")])
-        if not file_path:
-            return
-        try:
-            self.current_file = Path(file_path)
-            self.loaded_batches = omega_core.load_batches(self.current_file, cutoff_minutes=4.0)
-            if self._preload_after_id is not None:
-                self.root.after_cancel(self._preload_after_id)
-                self._preload_after_id = None
-            self._preload_batch_index = 0
-            self.show_batch_progress_window()
-            self._preload_after_id = self.root.after(50, self.preload_loaded_batches)
-            self.status_var.set(
-                f"Загружено проб: {len(self.loaded_batches)}. "
-                "Запускаю последовательный расчёт."
-            )
-        except Exception as e:
-            self.close_batch_progress_window()
-            messagebox.showerror("Ошибка", str(e), parent=self.root)
+        Thread(target=run, daemon=True, name="omega-worker").start()
+        self._preload_after_id = self.root.after(50, poll)
 
     def show_batch_progress_window(self):
         self.close_batch_progress_window()
@@ -1415,6 +692,8 @@ class ChromatogramApp:
     def close_batch_progress_window(self):
         window = self.batch_progress_window
         self.batch_progress_window = None
+        if self.batch_progress_bar is not None:
+            self.batch_progress_bar.stop()
         self.batch_progress_bar = None
         if window is not None and window.winfo_exists():
             try:
@@ -1443,11 +722,13 @@ class ChromatogramApp:
             if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
                 self.populate_batch_results_tree()
             self.status_var.set(f"Рассчёт всех проб завершён: {total}/{total}")
+            logging.getLogger("omega").info("CSV analysis and display complete: %d samples", total)
             return
 
         index = self._preload_batch_index
         batch = self.loaded_batches[index]
         sample_name = batch.get("sample_name", batch.get("file_name", f"Проба {index + 1}"))
+        logging.getLogger("omega").info("Processing sample %d/%d: %s", index + 1, total, sample_name)
         self.batch_progress_label_var.set(f"Проба {index + 1} из {total}")
         self.batch_progress_detail_var.set(f"Сейчас анализируется: {sample_name}")
         if self.batch_progress_bar is not None:
@@ -1455,62 +736,43 @@ class ChromatogramApp:
             self.batch_progress_bar["value"] = index
         self.root.update_idletasks()
         self.status_var.set(f"Расчёт пробы: {index + 1}/{total}")
-        try:
-            self.process_batch(batch)
-        except Exception as exc:
-            self.close_batch_progress_window()
-            self.status_var.set(f"Ошибка при расчёте пробы {index + 1}/{total}")
-            messagebox.showerror("Ошибка анализа", f"{sample_name}\n\n{exc}", parent=self.root)
-            return
-        self._preload_batch_index += 1
-        self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
+        reference_targets = self.reference_targets.copy(deep=True)
+
+        def finished(result):
+            batch.update(result)
+            self._preload_batch_index += 1
+            self._preload_after_id = self.root.after(25, self.preload_loaded_batches)
+
+        self._run_background(
+            lambda: process_chromatogram_batch(batch["dataframe"], reference_targets),
+            finished,
+        )
 
     def refresh_peaks(self, preserve_plot_view: bool = False, redraw_plot: bool = True):
         if self.df_processed is None:
             return
         current_batch = self.loaded_batches[self.current_batch_index] if self.loaded_batches else None
-        self.matched_targets_df = core_metrics.annotate_peak_heights(
-            self.df_processed,
-            self.matched_targets_df,
-        )
-        raw_omega = core_metrics.compute_omega(self.matched_targets_df)
         baseline_mode = current_batch.get("baseline_mode", "chebyshev") if current_batch is not None else "chebyshev"
-        cluster_quality_score = core_metrics.compute_cluster_quality(self.matched_targets_df)
-        confidence = core_metrics.assess_confidence(
-            self.matched_targets_df,
-            self.peaks_df,
-            raw_omega,
-            baseline_mode,
-            cluster_quality_score,
-        )
-        scaled_result = instrument_profiles.apply_result_multiplier(
-            {"omega": raw_omega, "omega_report": raw_omega["omega3_trio"]},
-            self.active_instrument_profile,
-        )
+        scaled_result = finalize_result({**(current_batch or {}),
+            "processed_df": self.df_processed, "matched_targets_df": self.matched_targets_df,
+            "peaks_df": self.peaks_df, "baseline_mode": baseline_mode}, self.active_instrument_profile)
+        self.matched_targets_df = scaled_result["matched_targets_df"]
+        cluster_quality_score = scaled_result["cluster_quality_score"]
+        confidence = scaled_result["confidence"]
         omega = scaled_result["omega"]
         report_value = scaled_result["omega_report"]
         if current_batch is not None:
-            current_batch["processed_df"] = self.df_processed
+            current_batch.update(scaled_result)
             current_batch["best_window"] = self.best_window
-            current_batch["peaks_df"] = self.peaks_df
-            current_batch["matched_targets_df"] = self.matched_targets_df
             current_batch["rt_shift"] = self.current_rt_shift
-            current_batch["omega"] = omega
-            current_batch["omega_report"] = report_value
-            current_batch["omega_report_unscaled"] = scaled_result["omega_report_unscaled"]
-            current_batch["instrument_profile_id"] = self.active_instrument_profile["id"]
-            current_batch["instrument_profile_name"] = self.active_instrument_profile["name"]
-            current_batch["result_multiplier"] = self.active_instrument_profile["result_multiplier"]
-            current_batch["cluster_quality_score"] = cluster_quality_score
-            current_batch["confidence"] = confidence
-            report_value = current_batch["omega_report"]
 
         if np.isfinite(report_value):
+            qualifier = " (оценка по модели)" if scaled_result["report_status"] == "model_estimate" else ""
             self.omega_var.set(
-                f"Omega-3: {report_value:.2f}% | strict: {omega['omega3_trio_strict']:.2f}%"
+                f"{report_value:.2f}%{qualifier}"
             )
         else:
-            self.omega_var.set("Omega-3: —")
+            self.omega_var.set("—")
 
         gamma_text = "γ-Linolenic: —"
         if not self.matched_targets_df.empty:
@@ -1527,6 +789,7 @@ class ChromatogramApp:
         self.current_confidence = confidence
         self.confidence_var.set(confidence.get("button_text", "Качество пиков: —"))
         self.confidence_button.state(["!disabled"])
+        self.update_review_panel()
 
         if redraw_plot:
             self.update_plot(preserve_view=preserve_plot_view)
@@ -1542,7 +805,7 @@ class ChromatogramApp:
         else:
             rt_text = f"RT shift: {self.current_rt_shift:+.3f} min"
         self.status_var.set(
-            f"{rt_text} | matched {int(self.matched_targets_df['matched_peak_id'].notna().sum())}/{len(self.reference_targets)}"
+            f"Определено кислот: {int(self.matched_targets_df['found_rt'].notna().sum())} из {len(self.reference_targets)} · Выберите кислоту для проверки границ"
         )
         self.integration_var.set(
             f"Integration: {len(self.peaks_df)} peaks | SG {self.best_window}"
@@ -1551,335 +814,6 @@ class ChromatogramApp:
         if self.batch_results_window is not None and self.batch_results_window.winfo_exists():
             self.populate_batch_results_tree()
 
-    def _resolve_selected_plot_items(self):
-        selected_row = None
-        selected_peak = None
-        if self.selected_target_code and not self.matched_targets_df.empty:
-            selected_match = self.matched_targets_df[self.matched_targets_df["code"] == self.selected_target_code]
-            if not selected_match.empty:
-                selected_row = selected_match.iloc[0]
-                matched_peak_id = pd.to_numeric(selected_match["matched_peak_id"], errors="coerce").iloc[0]
-                if np.isfinite(matched_peak_id) and not self.peaks_df.empty:
-                    selected_peak_match = self.peaks_df[self.peaks_df["peak_id"] == int(matched_peak_id)]
-                    if not selected_peak_match.empty:
-                        selected_peak = selected_peak_match.iloc[0]
-        return selected_row, selected_peak
-
-    def _visual_peak_footprint_bounds(
-        self, target_row, x: np.ndarray, y_smooth: np.ndarray,
-    ) -> tuple[float, float]:
-        """Paint only the interval actually used for numerical integration."""
-        start = pd.to_numeric(target_row.get("integration_start_x"), errors="coerce")
-        end = pd.to_numeric(target_row.get("integration_end_x"), errors="coerce")
-        return float(start), float(end)
-
-    def _draw_chromatogram_axis(
-        self,
-        axis,
-        x: np.ndarray,
-        y: np.ndarray,
-        y_smooth: np.ndarray,
-        fill_y: np.ndarray,
-        marker_y: np.ndarray,
-        selected_row,
-        selected_peak,
-        title: str,
-        x_min=None,
-        x_max=None,
-        compact: bool = False,
-        normalized: bool = False,
-    ):
-        axis.clear()
-        axis.set_facecolor("#fcfcfc")
-        y_draw = y
-        y_smooth_draw = y_smooth
-        fill_y_draw = fill_y
-        marker_y_draw = marker_y
-        if normalized:
-            visible_mask = np.ones(len(x), dtype=bool)
-            if x_min is not None:
-                visible_mask &= x >= float(x_min)
-            if x_max is not None:
-                visible_mask &= x <= float(x_max)
-            if np.any(visible_mask):
-                local_candidates = [
-                    np.abs(y_smooth[visible_mask]),
-                    np.abs(marker_y[visible_mask]),
-                    np.abs(fill_y[visible_mask]),
-                ]
-                local_scale = max(
-                    1e-9,
-                    max(float(np.nanmax(values)) for values in local_candidates if values.size > 0),
-                )
-                y_draw = y / local_scale
-                y_smooth_draw = y_smooth / local_scale
-                fill_y_draw = fill_y / local_scale
-                marker_y_draw = marker_y / local_scale
-        axis.axhline(0.0, color="#777777", linewidth=0.8, alpha=0.55)
-        axis.grid(color="#d9d9d9", linewidth=0.45, alpha=0.55)
-        axis.plot(x, y_draw, linewidth=0.95 if compact else 1.0, color="#2a5b84", alpha=0.50, label="Corrected")
-        axis.plot(x, y_smooth_draw, linewidth=1.05 if compact else 1.2, color="#111111", alpha=0.92, label="Smoothed")
-
-        if not self.peaks_df.empty:
-            for _, peak in self.peaks_df.iterrows():
-                peak_start_x = float(peak["start_x"])
-                peak_end_x = float(peak["end_x"])
-                peak_apex_x = float(peak["apex_x"])
-                if x_min is not None and peak_end_x < x_min:
-                    continue
-                if x_max is not None and peak_start_x > x_max:
-                    continue
-                start_idx = int(peak["start_idx"])
-                end_idx = int(peak["end_idx"])
-                apex_idx = int(peak["apex_idx"])
-                axis.axvline(peak_start_x, color="#caa25a", linewidth=0.45 if compact else 0.5, alpha=0.18)
-                axis.axvline(peak_end_x, color="#caa25a", linewidth=0.45 if compact else 0.5, alpha=0.18)
-                axis.scatter(x[apex_idx], marker_y_draw[apex_idx], s=10 if compact else 16, color="#b84a35", alpha=0.75, zorder=4)
-
-        if not self.matched_targets_df.empty:
-            for _, target_row in self.matched_targets_df.iterrows():
-                start_x = pd.to_numeric(pd.Series([target_row.get("integration_start_x")]), errors="coerce").iloc[0]
-                end_x = pd.to_numeric(pd.Series([target_row.get("integration_end_x")]), errors="coerce").iloc[0]
-                if not (np.isfinite(start_x) and np.isfinite(end_x)):
-                    continue
-                if x_min is not None and end_x < x_min:
-                    continue
-                if x_max is not None and start_x > x_max:
-                    continue
-                start_idx = int(np.argmin(np.abs(x - float(start_x))))
-                end_idx = int(np.argmin(np.abs(x - float(end_x))))
-                if end_idx <= start_idx:
-                    continue
-                visual_start_x, visual_end_x = self._visual_peak_footprint_bounds(target_row, x, y_smooth)
-                visual_start_idx = int(np.argmin(np.abs(x - visual_start_x)))
-                visual_end_idx = int(np.argmin(np.abs(x - visual_end_x)))
-                visual_fill = np.clip(y_smooth_draw, 0.0, None)
-                if visual_end_idx > visual_start_idx:
-                    axis.fill_between(
-                        x[visual_start_idx:visual_end_idx + 1],
-                        0.0,
-                        visual_fill[visual_start_idx:visual_end_idx + 1],
-                        color="#f2b134",
-                        alpha=0.18 if compact else 0.20,
-                        linewidth=0.0,
-                        zorder=1.8,
-                    )
-                axis.fill_between(
-                    x[start_idx:end_idx + 1],
-                    0.0,
-                    fill_y_draw[start_idx:end_idx + 1],
-                    color="#f2b134",
-                    alpha=0.22 if compact else 0.24,
-                    linewidth=0.0,
-                    zorder=2,
-                )
-                axis.axvline(float(start_x), color="#d6a033", linewidth=0.65 if compact else 0.75, alpha=0.32, zorder=3)
-                axis.axvline(float(end_x), color="#d6a033", linewidth=0.65 if compact else 0.75, alpha=0.32, zorder=3)
-
-        if selected_row is not None:
-            start_x = pd.to_numeric(pd.Series([selected_row.get("integration_start_x") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
-            end_x = pd.to_numeric(pd.Series([selected_row.get("integration_end_x") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
-            manual_start_x, manual_end_x = self._manual_bounds_from_vars()
-            if np.isfinite(manual_start_x) and np.isfinite(manual_end_x):
-                start_x, end_x = manual_start_x, manual_end_x
-            apex_x = pd.to_numeric(pd.Series([selected_row.get("found_rt") if selected_row is not None else np.nan]), errors="coerce").iloc[0]
-            if (not np.isfinite(start_x) or not np.isfinite(end_x)) and selected_peak is not None:
-                start_x = float(selected_peak["start_x"])
-                end_x = float(selected_peak["end_x"])
-            if not np.isfinite(apex_x) and selected_peak is not None:
-                apex_x = float(selected_peak["apex_x"])
-            if not np.isfinite(apex_x) and np.isfinite(start_x) and np.isfinite(end_x):
-                apex_x = 0.5 * (float(start_x) + float(end_x))
-            if np.isfinite(start_x) and np.isfinite(end_x) and np.isfinite(apex_x) and (x_min is None or end_x >= x_min) and (x_max is None or start_x <= x_max):
-                start_idx = int(np.argmin(np.abs(x - float(start_x))))
-                end_idx = int(np.argmin(np.abs(x - float(end_x))))
-                apex_idx = int(np.argmin(np.abs(x - float(apex_x))))
-                visual_start_x, visual_end_x = self._visual_peak_footprint_bounds(selected_row, x, y_smooth)
-                visual_start_idx = int(np.argmin(np.abs(x - visual_start_x)))
-                visual_end_idx = int(np.argmin(np.abs(x - visual_end_x)))
-                visual_fill = np.clip(y_smooth_draw, 0.0, None)
-                selected_visual_fill_artist = None
-                if visual_end_idx > visual_start_idx:
-                    selected_visual_fill_artist = axis.fill_between(
-                        x[visual_start_idx:visual_end_idx + 1],
-                        0.0,
-                        visual_fill[visual_start_idx:visual_end_idx + 1],
-                        color="#ff7c96",
-                        alpha=0.26 if compact else 0.28,
-                        linewidth=0.0,
-                        zorder=2.7,
-                    )
-                selected_fill_artist = axis.fill_between(
-                    x[start_idx:end_idx + 1],
-                    0.0,
-                    fill_y_draw[start_idx:end_idx + 1],
-                    color="#ff4d6d",
-                    alpha=0.36 if compact else 0.40,
-                    linewidth=0.0,
-                    zorder=3,
-                )
-                start_line = axis.axvline(float(start_x), color="#ff4d6d", linewidth=1.0 if compact else 1.2, alpha=0.85, zorder=5)
-                end_line = axis.axvline(float(end_x), color="#ff4d6d", linewidth=1.0 if compact else 1.2, alpha=0.85, zorder=5)
-                self._manual_overlay_artists[axis] = {
-                    "fill": selected_fill_artist,
-                    "start_line": start_line,
-                    "end_line": end_line,
-                    "x": x,
-                    "fill_y": fill_y_draw,
-                    "y_smooth": y_smooth,
-                    "visual_fill_y": visual_fill,
-                    "visual_fill": selected_visual_fill_artist,
-                    "marker_y": marker_y_draw,
-                    "compact": compact,
-                }
-                selected_marker_artist = axis.scatter(
-                    x[apex_idx],
-                    marker_y_draw[apex_idx],
-                    s=44 if compact else 70,
-                    facecolor="#fff3f6",
-                    edgecolor="#ff4d6d",
-                    linewidth=1.3 if compact else 1.6,
-                    zorder=6,
-                )
-                self._manual_overlay_artists[axis]["marker"] = selected_marker_artist
-
-        visible_codes = []
-        if not self.matched_targets_df.empty:
-            labeled = self.matched_targets_df[self.matched_targets_df["matched_peak_id"].notna()].copy()
-            for _, row in labeled.iterrows():
-                found_rt = float(row["found_rt"])
-                if x_min is not None and found_rt < x_min:
-                    continue
-                if x_max is not None and found_rt > x_max:
-                    continue
-                apex_idx = int(np.argmin(np.abs(x - found_rt)))
-                visible_codes.append(str(row["code"]))
-                axis.text(
-                    found_rt,
-                    marker_y_draw[apex_idx] + max(
-                        np.nanmax(marker_y_draw) * 0.010,
-                        0.06 if normalized else (50.0 if compact else 80.0),
-                    ),
-                    str(row["code"]),
-                    fontsize=6.4 if compact else 7,
-                    rotation=90,
-                    ha="center",
-                    va="bottom",
-                    color="#2c3e50",
-                    alpha=0.92,
-                )
-
-        if selected_row is not None and pd.notna(selected_row.get("found_rt")):
-            selected_rt = float(selected_row["found_rt"])
-            if (x_min is None or selected_rt >= x_min) and (x_max is None or selected_rt <= x_max):
-                apex_idx = int(np.argmin(np.abs(x - selected_rt)))
-                label_text = f"{selected_row['code']}  RT {selected_rt:.4f}"
-                selected_annotation = axis.annotate(
-                    label_text,
-                    xy=(selected_rt, marker_y_draw[apex_idx]),
-                    xytext=(10, 12 if compact else 14),
-                    textcoords="offset points",
-                    fontsize=7 if compact else 8,
-                    color="#7a1028",
-                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "#fff3f6", "edgecolor": "#ff4d6d", "alpha": 0.95},
-                    arrowprops={"arrowstyle": "->", "color": "#ff4d6d", "lw": 0.9},
-                    zorder=7,
-                )
-                if axis in self._manual_overlay_artists:
-                    self._manual_overlay_artists[axis]["annotation"] = selected_annotation
-
-        if x_min is not None and x_max is not None:
-            axis.set_xlim(float(x_min), float(x_max))
-            if visible_codes:
-                peak_text = ", ".join(visible_codes)
-                axis.text(
-                    0.01,
-                    0.98,
-                    peak_text,
-                    transform=axis.transAxes,
-                    ha="left",
-                    va="top",
-                    fontsize=7,
-                    color="#304860",
-                    bbox={"boxstyle": "round,pad=0.20", "facecolor": "#ffffff", "edgecolor": "#d5dde5", "alpha": 0.85},
-                )
-            if normalized:
-                visible_mask = (x >= float(x_min)) & (x <= float(x_max))
-                local_min = float(np.nanmin(y_draw[visible_mask])) if np.any(visible_mask) else 0.0
-                local_max = float(np.nanmax(np.maximum.reduce([
-                    np.asarray(y_draw[visible_mask]),
-                    np.asarray(y_smooth_draw[visible_mask]),
-                    np.asarray(fill_y_draw[visible_mask]),
-                ]))) if np.any(visible_mask) else 1.0
-                axis.set_ylim(min(-0.08, local_min * 1.08), max(1.05, local_max * 1.12))
-        axis.set_title(title, fontsize=9 if compact else 11, pad=6)
-        axis.tick_params(labelsize=7 if compact else 9)
-        axis.set_xlabel("Time, min", fontsize=8 if compact else 10)
-        axis.set_ylabel("Norm." if normalized else "Signal", fontsize=8 if compact else 10)
-        for spine in axis.spines.values():
-            spine.set_color("#b8c2cc")
-            spine.set_linewidth(0.8)
-
-    @staticmethod
-    def _capture_axes_views(axes):
-        return [
-            (tuple(axis.get_xlim()), tuple(axis.get_ylim()))
-            for axis in axes
-        ]
-
-    @staticmethod
-    def _restore_axes_views(axes, saved_views):
-        if len(saved_views) != len(axes):
-            return
-        for axis, (x_limits, y_limits) in zip(axes, saved_views):
-            axis.set_xlim(*x_limits)
-            axis.set_ylim(*y_limits)
-
-    def update_plot(self, preserve_view: bool = False):
-        axes = [self.ax, *getattr(self, "preview_axes", [])]
-        saved_views = self._capture_axes_views(axes) if preserve_view else []
-        x_col = _get_x_column_name(self.df_processed)
-        x = self.df_processed[x_col].to_numpy(dtype=float)
-        y = self.df_processed["y_corrected"].to_numpy(dtype=float)
-        y_smooth = self.df_processed["y_smooth"].to_numpy(dtype=float)
-        fill_y = np.clip(y, 0.0, None)
-        marker_y = y
-        selected_row, selected_peak = self._resolve_selected_plot_items()
-        self._manual_overlay_artists = {}
-
-        self._draw_chromatogram_axis(
-            self.ax,
-            x=x,
-            y=y,
-            y_smooth=y_smooth,
-            fill_y=fill_y,
-            marker_y=marker_y,
-            selected_row=selected_row,
-            selected_peak=selected_peak,
-            title="Общая хроматограмма",
-            compact=False,
-        )
-        self.ax.legend(loc="upper right", fontsize=8)
-
-        for preview_ax, (label, x_min, x_max) in zip(self.preview_axes, self.preview_specs):
-            self._draw_chromatogram_axis(
-                preview_ax,
-                x=x,
-                y=y,
-                y_smooth=y_smooth,
-                fill_y=fill_y,
-                marker_y=marker_y,
-                selected_row=selected_row,
-                selected_peak=selected_peak,
-                title=f"Фрагмент основного графика: {label}",
-                x_min=x_min,
-                x_max=x_max,
-                compact=True,
-                normalized=True,
-            )
-        if preserve_view:
-            self._restore_axes_views(axes, saved_views)
-        self.canvas.draw_idle()
 
     def update_table(self):
         for i in self.tree.get_children():
@@ -1906,9 +840,9 @@ class ChromatogramApp:
                 "" if pd.isna(row.get("corrected_target_rt", row.get("expected_rt")))
                 else f"{float(row.get('corrected_target_rt', row.get('expected_rt'))):.4f}",
                 "" if pd.isna(row.get("found_rt")) else f"{row['found_rt']:.4f}",
-                row.get("status", ""),
+                readable_status(row.get("status", "")),
             )
-            self.tree.insert("", "end", iid=code, values=vals)
+            self.tree.insert("", "end", iid=code, values=vals, tags=("review",) if code in risky_codes else ())
         if self.selected_target_code not in available_codes:
             self.selected_target_code = None
         if self.selected_target_code is not None:
@@ -1919,4 +853,5 @@ class ChromatogramApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = ChromatogramApp(root)
+    root.after(150, app.start_application)
     root.mainloop()

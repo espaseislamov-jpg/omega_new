@@ -98,7 +98,7 @@ def load_reference_targets(reference_path: Path = DEFAULT_REFERENCE_PATH) -> pd.
 
 def extract_sample_name_from_header(file_path: Path) -> str:
     try:
-        with Path(file_path).open("r", encoding="utf-8", errors="ignore") as f:
+        with Path(file_path).open("r", encoding="utf-8-sig", errors="ignore") as f:
             header_lines = [next(f, "") for _ in range(3)]
     except OSError:
         return Path(file_path).stem
@@ -123,22 +123,20 @@ def finalize_chromatogram_dataframe(df: pd.DataFrame, cutoff_minutes: float = 4.
         raise ValueError("Not enough unique x values to estimate chromatogram step.")
 
     step = float(np.median(np.diff(unique_x)))
-    corrected_x: list[float] = []
     x_values = df["x"].to_numpy(dtype=float)
-    i = 0
-    n = len(df)
-    while i < n:
-        current_x = x_values[i]
-        j = i + 1
-        while j < n and x_values[j] == current_x:
-            j += 1
-        group_size = j - i
-        offsets = np.linspace(0.0, step * (group_size - 1) / max(group_size, 1), group_size)
-        corrected_x.extend((current_x + offsets).tolist())
-        i = j
-
-    df["x_corrected"] = corrected_x
-    return df[df["x_corrected"] >= cutoff_minutes].reset_index(drop=True)
+    if not np.isfinite(df[["x", "y"]].to_numpy()).all() or np.any(np.diff(x_values) < 0):
+        raise ValueError("В сигнале есть бесконечные значения или время идёт назад.")
+    starts = np.r_[0, np.flatnonzero(np.diff(x_values) != 0) + 1]
+    sizes = np.diff(np.r_[starts, len(df)])
+    rank = np.arange(len(df)) - np.repeat(starts, sizes)
+    counts = np.repeat(sizes, sizes)
+    # Same linear subdivision as the former per-group np.linspace loop.
+    offsets = (step * (counts-1) / counts) / np.maximum(counts-1, 1) * rank
+    df["x_corrected"] = x_values + offsets
+    out = df[df["x_corrected"] >= cutoff_minutes].reset_index(drop=True)
+    if len(out) < 2:
+        raise ValueError("После отсечения начала хроматограммы осталось меньше двух точек.")
+    return out
 
 
 def load_chromatogram(file_path: Path, cutoff_minutes: float = 4.0) -> pd.DataFrame:
@@ -148,7 +146,7 @@ def load_chromatogram(file_path: Path, cutoff_minutes: float = 4.0) -> pd.DataFr
 
 def is_chromtab_file(file_path: Path) -> bool:
     try:
-        with Path(file_path).open("r", encoding="utf-8", errors="ignore") as f:
+        with Path(file_path).open("r", encoding="utf-8-sig", errors="ignore") as f:
             first_line = next(f, "").strip()
             next(f, "")
             third_line = next(f, "").strip()
@@ -186,7 +184,7 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float = 4.0) -> list[
         current_meta = None
         current_rows = []
 
-    with Path(file_path).open("r", encoding="utf-8", errors="ignore") as f:
+    with Path(file_path).open("r", encoding="utf-8-sig", errors="ignore") as f:
         for raw_line in f:
             line = raw_line.strip()
             if not line:
@@ -211,7 +209,10 @@ def load_chromtab_batches(file_path: Path, cutoff_minutes: float = 4.0) -> list[
             if current_meta is None:
                 continue
 
-            parsed = next(csv.reader([line]), [])
+            # Instrument signal rows are normally two unquoted numbers. Avoid
+            # constructing millions of csv.reader objects; quoted fields keep
+            # the original parser (including its error/escaping behaviour).
+            parsed = next(csv.reader([line]), []) if '"' in line else line.split(',', 2)
             if len(parsed) < 2:
                 continue
             try:

@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
+import importlib.metadata
 import os
 import runpy
 import subprocess
 import sys
+import logging
+import json
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from omega_path_compat import configure_windows_path_compat
+from omega_version import APP_NAME
 
-APP_NAME = "omega_v2"
-MIN_PYTHON = (3, 10)
+MIN_PYTHON = (3, 14)
 REQUIREMENT_FILES = ("requirements.txt",)
 REQUIRED_MODULES = {
     "numpy": "numpy",
@@ -20,9 +24,9 @@ REQUIRED_MODULES = {
     "openpyxl": "openpyxl",
     "pybaselines": "pybaselines",
     "lmfit": "lmfit",
+    "pyopenms": "pyopenms",
 }
 OPTIONAL_MODULES = {
-    "pyopenms": "pyopenms",
     "chromatopy": "chromatopy",
 }
 
@@ -40,9 +44,18 @@ def _resource_path(relative: str) -> Path:
 
 def _missing_modules() -> list[str]:
     missing: list[str] = []
+    path = _resource_path("requirements.txt")
+    pins = dict(line.strip().split("==", 1) for line in path.read_text(encoding="utf-8").splitlines()
+                if "==" in line and not line.lstrip().startswith("#")) if path.exists() else {}
     for module_name, package_name in REQUIRED_MODULES.items():
         if importlib.util.find_spec(module_name) is None:
             missing.append(package_name)
+        elif package_name in pins:
+            try:
+                if importlib.metadata.version(package_name) != pins[package_name]:
+                    missing.append(package_name)
+            except importlib.metadata.PackageNotFoundError:
+                missing.append(package_name)
     return missing
 
 
@@ -91,6 +104,12 @@ def _install_requirements_if_needed() -> None:
 
 
 def main() -> int:
+    log_dir = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Omega" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_dir / "startup.log", maxBytes=2_000_000, backupCount=2, encoding="utf-8")
+    logging.getLogger("omega").addHandler(handler)
+    logging.getLogger("omega").setLevel(logging.INFO)
+    logging.getLogger("omega").info("Starting Omega from %s", sys.executable)
     if sys.version_info < MIN_PYTHON:
         raise RuntimeError(
             f"{APP_NAME} requires Python {MIN_PYTHON[0]}.{MIN_PYTHON[1]}+; "
@@ -100,7 +119,17 @@ def main() -> int:
     os.environ.setdefault("OMEGA_APP_NAME", APP_NAME)
     configure_windows_path_compat()
     _install_requirements_if_needed()
-    runpy.run_module("New_idea", run_name="__main__")
+    try:
+        from omega_core import runtime
+        runtime.verify_versions()
+        (log_dir / "runtime.json").write_text(json.dumps(runtime.snapshot(), indent=2), encoding="utf-8")
+        if "--verify-csv" in sys.argv:
+            from omega_core.verification import main as verify
+            return verify(sys.argv[1:])
+        runpy.run_module("New_idea", run_name="__main__")
+    except Exception:
+        logging.getLogger("omega").exception("Application startup failed")
+        raise
     return 0
 
 

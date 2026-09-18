@@ -118,6 +118,8 @@ def _clear_match(out: pd.DataFrame, row_idx: int) -> None:
     out.at[row_idx, "matched_peak_id"] = np.nan
     out.at[row_idx, "match_score"] = np.nan
     out.at[row_idx, "status"] = "not_found"
+    out.at[row_idx, "integration_start_x"] = np.nan
+    out.at[row_idx, "integration_end_x"] = np.nan
 
 
 def _assign_peak(out: pd.DataFrame, row_idx: int, peak_row: pd.Series, status: str, match_score: float) -> None:
@@ -179,6 +181,16 @@ def _select_reliable_rt_peak_position(
     return nearest_pos
 
 
+def _protected_peak_ids(out: pd.DataFrame, cluster_codes) -> set:
+    """Cluster retries may not steal an independently identified outside peak."""
+    reliable = out.get("rt_reliable", pd.Series(False, index=out.index)).fillna(False).astype(bool)
+    distance = pd.to_numeric(out.get("match_score", pd.Series(np.nan, index=out.index)), errors="coerce")
+    reliable &= distance.le(RELIABLE_RT_WINDOW) & out.area.gt(0) & out.found_rt.notna()
+    manual = out.get("status", pd.Series("", index=out.index)).astype(str).str.contains("manual", regex=False)
+    owned = out[~out.code.isin(cluster_codes) & (reliable | manual)]
+    return set(owned.matched_peak_id.dropna())
+
+
 def _apply_target_cluster_override(
     matched_targets: pd.DataFrame,
     peaks: pd.DataFrame,
@@ -201,7 +213,7 @@ def _apply_target_cluster_override(
     else:
         max_distances = [float(value) for value in max_distance]
 
-    used_mask = np.zeros(len(peaks), dtype=bool)
+    used_mask = peaks.peak_id.isin(_protected_peak_ids(out, cluster_codes)).to_numpy()
     chosen = {}
     for code, target_apex, target_max_distance in zip(cluster_codes, target_apexes, max_distances):
         adjusted_target = float(target_apex + rt_shift)
@@ -283,6 +295,7 @@ def apply_c22_cluster_override(
     candidate_pool = np.flatnonzero(
         (peaks_apex >= adjusted_targets[0] - max(max_distances))
         & (peaks_apex <= adjusted_targets[-1] + max(max_distances))
+        & ~peaks.peak_id.isin(_protected_peak_ids(out, cluster_codes)).to_numpy()
     ).tolist()
     best_assignment = None
     best_key = None
@@ -345,7 +358,7 @@ def apply_c22_cluster_override(
     return out
 
 
-def match_targets_to_peaks(
+def match_targets_to_peaks_legacy(
     targets_df: pd.DataFrame,
     peaks_df: pd.DataFrame,
     strict: bool = False,
@@ -362,10 +375,24 @@ def match_targets_to_peaks(
     peak_apex = peaks["apex_x"].to_numpy(dtype=float)
     peak_area = peaks["area"].to_numpy(dtype=float)
     refs = targets[targets["rt_reliable"] & targets["expected_rt"].notna()]
-    shift = estimate_rt_shift(refs["expected_rt"].to_numpy(dtype=float), peak_apex) if not refs.empty else 0.0
+    # Detection includes small neighbouring peaks; background extrema must not
+    # outvote the prominent chromatographic anchors in retention calibration.
+    calibration_peaks = peaks
+    if "prominence" in peaks and not refs.empty:
+        selected = set()
+        prominence = peaks.prominence.to_numpy(dtype=float)
+        for expected in refs.expected_rt:
+            nearby = np.flatnonzero(abs(peak_apex-float(expected)) <= .20)
+            if len(nearby):
+                floor = max(prominence[nearby]) * .02
+                selected.update(nearby[prominence[nearby] >= floor].tolist())
+        if selected:
+            calibration_peaks = peaks.iloc[sorted(selected)]
+    calibration_apex = calibration_peaks.apex_x.to_numpy(dtype=float)
+    shift = estimate_rt_shift(refs["expected_rt"].to_numpy(dtype=float), calibration_apex) if not refs.empty else 0.0
     if rt_profile.uses_custom_instrument_profile(targets) and not refs.empty:
         _, calibration_slope, calibration_intercept = estimate_profile_rt_calibration(
-            refs["expected_rt"].to_numpy(dtype=float), peak_apex
+            refs["expected_rt"].to_numpy(dtype=float), calibration_apex
         )
         # Every custom-profile row has an RT. Apply the same smooth curve even
         # if a future profile deliberately marks a row as soft.
@@ -496,3 +523,9 @@ def match_targets_to_peaks(
     )
     out = apply_c22_cluster_override(out, peaks_df, rt_shift=cluster_shift)
     return out, shift
+
+
+def match_targets_to_peaks(targets_df, peaks_df, strict=False):
+    """All current assignments use the same ordered profile matcher."""
+    from .assignment import match_ordered
+    return match_ordered(targets_df, peaks_df)
